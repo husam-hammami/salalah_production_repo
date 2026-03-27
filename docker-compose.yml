@@ -2,27 +2,25 @@ version: '3.8'
 
 services:
   frontend:
-    image: nginx:alpine
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
     container_name: hercules_frontend
-    volumes:
-      - ./dist:/usr/share/nginx/html:ro
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
       - "8080:80"
     depends_on:
       - backend
 
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     container_name: hercules_backend
     environment:
-      # PostgreSQL connection string using the service name "postgres"
-      - DATABASE_URL=postgresql://postgres:trust@postgres:5432/Dynamic_DB_Hercules
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/Dynamic_DB_Hercules
       - FLASK_ENV=production
-      - FLASK_SECRET_KEY=SuperSecretKey123!    # Added this line
-      - DB_HOST=postgres     # Add this line so the app connects to the Postgres container
-
-
+      - FLASK_SECRET_KEY=${FLASK_SECRET_KEY}
+      - DB_HOST=postgres
     ports:
       - "5000:5000"
     depends_on:
@@ -34,7 +32,7 @@ services:
     environment:
       - POSTGRES_DB=Dynamic_DB_Hercules
       - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=trust
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:

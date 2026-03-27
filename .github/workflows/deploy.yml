@@ -1,0 +1,23 @@
+name: Deploy Hercules v2.0
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Stop existing containers
+        run: docker-compose down
+
+      - name: Rebuild and start containers
+        run: docker-compose up -d --build
+
+      - name: Clean up old images
+        run: docker image prune -f

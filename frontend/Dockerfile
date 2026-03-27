@@ -1,11 +1,13 @@
-# Use NGINX as base image
+# Stage 1: Build the React app
+FROM node:18-alpine AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+# Stage 2: Serve with nginx
 FROM nginx:alpine
-
-# Copy the built frontend files into the NGINX html directory
-COPY dist/ /usr/share/nginx/html
-
-# Copy your custom NGINX config (optional but recommended for routing, CORS, etc.)
+COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
-
-# Expose port 80
 EXPOSE 80

@@ -9,15 +9,13 @@ jobs:
   deploy:
     runs-on: self-hosted
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    defaults:
+      run:
+        working-directory: C:\Users\Administrator\Desktop\Hercules v2.0 Docker\Salalah_production_code
 
-      - name: Create .env file
-        shell: cmd
-        run: |
-          echo POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}> .env
-          echo FLASK_SECRET_KEY=${{ secrets.FLASK_SECRET_KEY }}>> .env
+    steps:
+      - name: Pull latest code
+        run: git pull origin main
 
       - name: Stop existing containers
         run: docker-compose down

@@ -38,3 +38,5 @@ services:
 
 volumes:
   postgres_data:
+    name: herculesv20docker_postgres_data
+    external: true

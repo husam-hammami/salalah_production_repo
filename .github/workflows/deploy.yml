@@ -13,8 +13,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Create .env file
+        run: |
+          echo POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }} > .env
+          echo FLASK_SECRET_KEY=${{ secrets.FLASK_SECRET_KEY }} >> .env
+
       - name: Stop existing containers
         run: docker-compose down
+        continue-on-error: true
 
       - name: Rebuild and start containers
         run: docker-compose up -d --build

@@ -12,7 +12,7 @@ import Login from '../Pages/Login';
 import { ProtectedCredentials, ProtectedRoute } from './ProtectedRoute';
 import { Roles } from '../Data/Roles';
 import Energy from '../Pages/Energy';
-import Dashboard from '../Pages/Dashboard';
+import Dashboard from '../Pages/dashboard';
 import Report from '../Pages/Report';
 import NewReport from '../Pages/NewReport';
 import EnergyReport from '../Pages/EnergyReport';

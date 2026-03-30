@@ -1,0 +1,34 @@
+# Git
+.git
+.gitignore
+
+# Data files - not needed at runtime
+*.xlsx
+
+# Screenshots and archives
+*.PNG
+*.png
+*.zip
+frontend/*.PNG
+frontend/src.zip
+frontend/app.py
+frontend/orders_bp.py
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+
+# Dev/debug scripts
+check_*.py
+export_*.py
+test_*.py
+verify_*.py
+fix_sequence.py
+*_injection.py
+inject_*.py
+update_*.py
+
+# Documentation
+docs/
+*.md

@@ -2995,12 +2995,8 @@ def handle_connect():
     global monitor_running
     logger.info('Client connected to WebSocket')
     
-    # Start the monitor when first client connects (only if not already running)
-    if not monitor_running:
-        logger.info('Starting FCL monitor for first client')
-        gevent.spawn(fcl_realtime_monitor)
-    else:
-        logger.info('FCL monitor already running')
+    # Monitor is already spawned on module import — no need to spawn again
+    logger.info('FCL monitor already running' if monitor_running else 'Waiting for monitor startup')
 
 @socketio.on('disconnect')
 def handle_disconnect():
@@ -3037,8 +3033,6 @@ if not monitor_running:
 if __name__ == '__main__':
     logger.info("Starting Flask-SocketIO server...")
     start_scheduler()
-     # ✅ Start monitor manually for testing
-    gevent.spawn(fcl_realtime_monitor)
     socketio.run(app, debug=False, host='0.0.0.0', port=5000, use_reloader=False)
 
 

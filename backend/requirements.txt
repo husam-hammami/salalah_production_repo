@@ -7,7 +7,6 @@ Werkzeug==2.3.6
 setuptools>=65.5.1
 gunicorn==20.1.0
 Flask-SocketIO==5.3.6
-eventlet==0.33.3
 urllib3==2.0.7
 gevent==23.9.1
 gevent-websocket==0.10.1

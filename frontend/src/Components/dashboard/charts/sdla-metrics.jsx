@@ -1,5 +1,5 @@
 import PropTypes from 'prop-types';
-import { Card, CardContent } from '../../../components/ui/card';
+import { Card, CardContent } from '../../../Components/ui/card';
 import { Thermometer, Gauge, BarChart3, Percent } from 'lucide-react';
 
 export function SDLAMetrics({ className = '' }) {

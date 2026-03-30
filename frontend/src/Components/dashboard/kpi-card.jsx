@@ -1,4 +1,4 @@
-import { Card, CardContent } from "@/components/ui/card"
+import { Card, CardContent } from "@/Components/ui/card"
 
 export function KPICard({ title, value, subtitle, icon, variant = "primary" }) {
   return (

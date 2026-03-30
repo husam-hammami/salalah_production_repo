@@ -1,6 +1,6 @@
 // MaterialUsageLineChart.jsx
 import { Line } from 'react-chartjs-2';
-import { Card } from '@/components/ui/card';
+import { Card } from '@/Components/ui/card';
 
 export default function MaterialUsageLineChart({ data }) {
   const chartData = {

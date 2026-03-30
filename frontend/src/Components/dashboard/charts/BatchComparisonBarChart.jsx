@@ -1,6 +1,6 @@
 // components/dashboard/charts/BatchComparisonBarChart.jsx
 import { Bar } from 'react-chartjs-2';
-import { Card } from '@/components/ui/card';
+import { Card } from '@/Components/ui/card';
 
 export default function BatchComparisonBarChart({ data }) {
   const chartData = {

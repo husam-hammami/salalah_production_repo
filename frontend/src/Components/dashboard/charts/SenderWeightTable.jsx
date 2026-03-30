@@ -1,5 +1,5 @@
 import PropTypes from 'prop-types';
-import { Card, CardContent, CardHeader, CardTitle } from '../../../components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle } from '../../../Components/ui/card';
 
 export function SenderWeightTable({ data }) {
   // Calculate total weight

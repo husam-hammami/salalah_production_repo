@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { Chart, registerables } from 'chart.js';
 import PropTypes from 'prop-types';
-import { Card } from '../../../components/ui/card';
+import { Card } from '../../../Components/ui/card';
 
 Chart.register(...registerables);
 

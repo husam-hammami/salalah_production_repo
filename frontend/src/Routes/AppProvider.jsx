@@ -1,16 +1,16 @@
 import { useContext } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { BinsProvider } from '../context/ApiContext/BinsContext';
-import { JobTypesProvider } from '../context/ApiContext/JobTypesContext';
-import { MaterialsProvider } from '../context/ApiContext/MaterialsContext';
-import { OrdersProvider } from '../context/ApiContext/OrdersContext';
-import { UsersProvider } from '../context/ApiContext/UsersContext';
-import { DarkModeProvider } from '../context/DarkModeProvider';
-import { NavbarProvider } from '../context/NavbarContext';
-import { AuthContext } from '../context/AuthProvider';
-import LoadingScreen from '../components/Common/LoadingScreen';
-import { ThemeProvider } from '../context/ThemeContext';
-import { SocketProvider } from '../context/SocketContext';
+import { BinsProvider } from '../Context/ApiContext/BinsContext';
+import { JobTypesProvider } from '../Context/ApiContext/JobTypesContext';
+import { MaterialsProvider } from '../Context/ApiContext/MaterialsContext';
+import { OrdersProvider } from '../Context/ApiContext/OrdersContext';
+import { UsersProvider } from '../Context/ApiContext/UsersContext';
+import { DarkModeProvider } from '../Context/DarkModeProvider';
+import { NavbarProvider } from '../Context/NavbarContext';
+import { AuthContext } from '../Context/AuthProvider';
+import LoadingScreen from '../Components/Common/LoadingScreen';
+import { ThemeProvider } from '../Context/ThemeContext';
+import { SocketProvider } from '../Context/SocketContext';
 
 // Create a client
 const queryClient = new QueryClient({

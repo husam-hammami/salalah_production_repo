@@ -1,5 +1,5 @@
 import React, { useState, useContext, useEffect } from "react";
-import KpiCard from "../components/charts/KpiCard";
+import KpiCard from "../Components/charts/KpiCard";
 import CircularChart from "../Components/charts/CircularChart";
 import { FaBolt, FaChargingStation, FaPlug, FaBatteryThreeQuarters, FaWifi, FaTimesCircle, FaChartLine, FaExclamationTriangle } from "react-icons/fa";
 import MultiLineChart from "../Components/charts/MultiLineChart";
@@ -9,7 +9,7 @@ import GaugeChart from "../Components/charts/GaugeChart";
 import CardLineData from "../Components/charts/CardLineData";
 import PowerMonitorDiagram from "../Components/charts/PowerMonitorDiagram";
 import PowerVoltageCircles from "../Components/charts/PowerVoltageCircles";
-import usePowerMonitor from "../hooks/usePowerMonitor";
+import usePowerMonitor from "../Hooks/usePowerMonitor";
 import { DarkModeContext } from "../Context/DarkModeProvider";
 
 // Industrial Color Palette - Calm, operator-friendly

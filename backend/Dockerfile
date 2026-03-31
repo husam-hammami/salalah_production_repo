@@ -39,6 +39,8 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 COPY . .
 
+RUN chmod +x entrypoint.sh
+
 EXPOSE 5000
 
-CMD ["gunicorn", "-k", "geventwebsocket.gunicorn.workers.GeventWebSocketWorker", "-w", "1", "-b", "0.0.0.0:5000", "app:app"]
+ENTRYPOINT ["./entrypoint.sh"]

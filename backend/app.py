@@ -1804,7 +1804,9 @@ def archive_mila_logs():
                             yield_log JSONB,
                             setpoints_produced JSONB,
                             produced_weight NUMERIC,
-                            created_at TIMESTAMP
+                            created_at TIMESTAMP,
+                            order_start_time TIMESTAMP,
+                            order_end_time TIMESTAMP
                         );
                     """)
 
@@ -1980,25 +1982,33 @@ def archive_mila_logs():
                     if mila_flour1_sum > 0 and count > 0:
                         final_yield_log["MILA_Flour1 (%)"] = round(mila_flour1_sum / count, 3)
 
-                    # 11. ✅ STEP 2: INSERT aggregated data into archive table (mila_monitor_logs_archive)
-                    # This is the MAIN table for reports
+                    # 11. Extract real order start/end times from live rows
+                    start_times = [r.get('order_start_time') for r in rows if r.get('order_start_time')]
+                    end_times = [r.get('order_end_time') for r in rows if r.get('order_end_time')]
+                    archive_order_start = min(start_times) if start_times else None
+                    archive_order_end = max(end_times) if end_times else None
+
+                    # 12. ✅ STEP 2: INSERT aggregated data into archive table (mila_monitor_logs_archive)
                     cur.execute("""
                         INSERT INTO mila_monitor_logs_archive (
                             order_name, status, receiver,
                             bran_receiver, yield_log, setpoints_produced,
-                            produced_weight, created_at
+                            produced_weight, created_at,
+                            order_start_time, order_end_time
                         )
                         VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
-                                %s::jsonb, %s, %s)
+                                %s::jsonb, %s, %s, %s, %s)
                     """, (
                         last_row["order_name"],
                         last_row["status"],
-                        json.dumps(final_receiver),         # ✅ SUMMED from flow rates
-                        json.dumps(final_bran_receiver),    # Last value, already kg
+                        json.dumps(final_receiver),
+                        json.dumps(final_bran_receiver),
                         json.dumps(final_yield_log),
                         json.dumps(final_setpoints),
-                        total_produced_weight,              # Last value, already kg
-                        archive_cutoff  # ✅ End of archived period (Dubai), not run time
+                        total_produced_weight,
+                        archive_cutoff,
+                        archive_order_start,
+                        archive_order_end,
                     ))
 
                     # 12. ✅ STEP 3: DELETE the archived data from live table (mila_monitor_logs)
@@ -2168,12 +2178,13 @@ def get_next_order_number(prefix, live_table, archive_table):
 mila_order_counter = 1
 mila_current_order_name = None
 mila_session_started = None
+mila_session_ended = None
 
 def mila_realtime_monitor():
     import datetime
     import json
 
-    global mila_order_counter, mila_current_order_name, mila_session_started
+    global mila_order_counter, mila_current_order_name, mila_session_started, mila_session_ended
 
     # Initialize counter from DB
     mila_order_counter = get_next_order_number("MILA", "mila_monitor_logs", "mila_monitor_logs_archive")
@@ -2312,20 +2323,23 @@ def mila_realtime_monitor():
             logger.info(f"[MILA] Loop Time: {now} | Job Status: {job_status} | Line Running: {linning_running}")
 
             # ✅ Use job_status for order management (like FCL/SCL)
+            mila_order_ending = False
+
             # 🟢 Start/Create order when job_status == 1 (order_active)
             if job_status == 1:
                 if not mila_current_order_name or not mila_session_started:
                     mila_current_order_name = f"MILA{mila_order_counter}"
                     mila_order_counter += 1
                     mila_session_started = now
-                    logger.info(f"🆕 New MILA Order Started: {mila_current_order_name} (job_status=1)")
+                    mila_session_ended = None
+                    logger.info(f"🆕 New MILA Order Started: {mila_current_order_name} at {now} (job_status=1)")
 
             # 🔴 End current order when job_status == 0 (order_done)
             elif job_status == 0:
                 if mila_current_order_name:
-                    logger.info(f"✅ MILA order done: {mila_current_order_name} (job_status=0) - waiting for next order")
-                    mila_current_order_name = None
-                    mila_session_started = None
+                    mila_session_ended = now
+                    logger.info(f"✅ MILA order done: {mila_current_order_name} at {now} (job_status=0) - waiting for next order")
+                    mila_order_ending = True
 
             # ✅ ALWAYS store data (regardless of line_running or job_status)
             # Data must be stored every second to track all values continuously
@@ -2395,21 +2409,30 @@ def mila_realtime_monitor():
                     INSERT INTO mila_monitor_logs (
                         order_name, status, receiver,
                         bran_receiver, yield_log,
-                        setpoints_produced, produced_weight, created_at
+                        setpoints_produced, produced_weight, created_at,
+                        order_start_time, order_end_time
                     ) VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
-                              %s::jsonb, %s, %s)
+                              %s::jsonb, %s, %s, %s, %s)
                 """, (
                     mila_current_order_name,
                     "running",
                     json.dumps(receiver_bins),
-                    json.dumps(bran_receiver_formatted),  # ✅ Use formatted bran receiver with DInt values
+                    json.dumps(bran_receiver_formatted),
                     json.dumps(yield_log),
                     json.dumps(setpoints_produced),
                     produced_weight,
-                    now  # ✅ Now uses Asia/Dubai timezone
+                    now,
+                    mila_session_started,
+                    mila_session_ended,
                 ))
                 conn.commit()
                 logger.info(f"✅ MILA log saved: {mila_current_order_name} | Produced: {produced_weight} kg | Time: {now}")
+
+            # Clear order state AFTER INSERT so the final row captures end time
+            if mila_order_ending:
+                mila_current_order_name = None
+                mila_session_started = None
+                mila_session_ended = None
 
         except Exception as e:
             logger.error(f"❌ MILA monitor error: {e}", exc_info=True)

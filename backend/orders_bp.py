@@ -3330,6 +3330,12 @@ def get_mila_archive_summary():
         
         average_setpoints_percentages = {k: round(v, 3) for k, v in last_setpoints.items() if isinstance(v, (int, float))}
 
+        # Use real order times if available, fall back to created_at for old data
+        all_start_times = [r.get("order_start_time") for r in exact_rows if r.get("order_start_time")]
+        all_end_times = [r.get("order_end_time") for r in exact_rows if r.get("order_end_time")]
+        real_start = min(all_start_times) if all_start_times else first_record.get("created_at")
+        real_end = max(all_end_times) if all_end_times else last_record.get("created_at")
+
         summary_response = {
             "record_count": record_count,
             "total_produced_weight": round(total_produced_weight, 3),
@@ -3338,8 +3344,8 @@ def get_mila_archive_summary():
             "average_yield_flows": average_yield_flows,
                 "bran_receiver_totals": bran_receiver_totals,
                 "receiver_weight_totals": receiver_weight_totals,
-            "start_time": first_record.get("created_at"),
-            "end_time": last_record.get("created_at")
+            "start_time": real_start,
+            "end_time": real_end,
         }
         
         logger.info(f"📊 [MIL-A Summary] Sending bran_receiver_totals: {bran_receiver_totals}")
@@ -3390,7 +3396,10 @@ def get_mila_analytics_summary():
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT MIN(created_at), MAX(created_at) FROM mila_monitor_logs_archive WHERE order_name = %s",
+                    """SELECT
+                        COALESCE(MIN(order_start_time), MIN(created_at)),
+                        COALESCE(MAX(order_end_time), MAX(created_at))
+                    FROM mila_monitor_logs_archive WHERE order_name = %s""",
                     (order_name,),
                 )
                 row = cur.fetchone()

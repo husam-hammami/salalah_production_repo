@@ -26,14 +26,49 @@ ChartJS.register(
   Legend
 );
 
-const MultiLineChart = ({ data }) => {
+const MultiLineChart = ({ data, title, dualAxis }) => {
   if (!data || !data.labels || !data.datasets) {
     return <div className="text-red-500">Chart data is not available</div>;
+  }
+
+  const hasDualAxis = dualAxis || data.datasets.some(ds => ds.yAxisID === 'y1');
+
+  const scales = {
+    x: {
+      grid: { display: false },
+      ticks: {
+        color: '#111827',
+        font: { size: 12, weight: 'bold' },
+      },
+    },
+    y: {
+      position: 'left',
+      grid: { display: false },
+      ticks: {
+        color: '#111827',
+        font: { size: 12, weight: 'bold' },
+      },
+    },
+  };
+
+  if (hasDualAxis) {
+    scales.y1 = {
+      position: 'right',
+      grid: { drawOnChartArea: false },
+      ticks: {
+        color: '#F59E0B',
+        font: { size: 12, weight: 'bold' },
+      },
+    };
   }
 
   const options = {
     responsive: true,
     maintainAspectRatio: false,
+    interaction: {
+      mode: 'index',
+      intersect: false,
+    },
     elements: {
       line: {
         tension: 0.4,
@@ -54,28 +89,13 @@ const MultiLineChart = ({ data }) => {
         },
       },
       title: {
-        display: true,
-        text: 'Line Current and Voltage Trends',
+        display: !!title,
+        text: title || '',
         color: '#111827',
-        font: { size: 18, weight: 'bold' },
+        font: { size: 16, weight: 'bold' },
       },
     },
-    scales: {
-      x: {
-        grid: { display: false },
-        ticks: {
-          color: '#111827',
-          font: { size: 12, weight: 'bold' },
-        },
-      },
-      y: {
-        grid: { display: false },
-        ticks: {
-          color: '#111827',
-          font: { size: 12, weight: 'bold' },
-        },
-      },
-    },
+    scales,
   };
 
   return <Line data={data} options={options} />;

@@ -1854,184 +1854,152 @@ def archive_mila_logs():
                         gevent.sleep(wait_seconds)
                         continue
 
-                    count = len(rows)
-                    
                     # ✅ Log time range of data being archived
-                    if rows:
-                        first_time = rows[0].get('created_at')
-                        last_time = rows[-1].get('created_at')
-                        logger.info(f"📊 [MILA Archive] Moving data from live table: {first_time} to {last_time}")
+                    first_time = rows[0].get('created_at')
+                    last_time = rows[-1].get('created_at')
+                    logger.info(f"📊 [MILA Archive] Moving data from live table: {first_time} to {last_time}")
 
-                    # 4. Process the data for archiving (aggregation logic)
-                    # 3. Max/Min flow
-                    max_flow = max(r['yield_log'].get("Yield Max Flow (kg/s)", 0) for r in rows)
-                    min_flow = min(r['yield_log'].get("Yield Min Flow (kg/s)", 0) for r in rows)
-
-                    # 4. Average yield %
-                    avg_yield_pct = defaultdict(float)
-                    yield_pct_keys = set()
-                    
-                    # Track MILA_Flour1 sum separately if it appears in yield_log (legacy support)
-                    mila_flour1_sum = 0.0
-                    
+                    # Group rows by order_name so different orders in the same
+                    # 30-minute window get separate archive rows with correct times.
+                    from collections import OrderedDict
+                    order_groups = OrderedDict()
                     for r in rows:
-                        for k, v in r['yield_log'].items():
-                            # Special handling for MILA_Flour1 if it exists in yield_log
-                            if "MILA_Flour1" in k:
-                                if isinstance(v, (int, float)):
-                                    mila_flour1_sum += v
-                                continue
-                                
-                            if isinstance(v, (int, float)) and "%" in k:
-                                avg_yield_pct[k] += v
-                                yield_pct_keys.add(k)
-                    for k in yield_pct_keys:
-                        avg_yield_pct[k] = round(avg_yield_pct[k] / count, 3)
+                        oname = r.get('order_name') or '__idle__'
+                        order_groups.setdefault(oname, []).append(r)
 
-                    # 5. Average setpoints % and numeric values (t/h, etc.)
-                    avg_setpoints_numeric = defaultdict(float)
-                    numeric_setpoint_keys = set()
-                    for r in rows:
-                        for k, v in r['setpoints_produced'].items():
-                            # Average both percentage fields AND numeric fields like Order Scale Flowrate (t/h)
-                            if isinstance(v, (int, float)) and ("%" in k or "t/h" in k):
-                                avg_setpoints_numeric[k] += v
-                                numeric_setpoint_keys.add(k)
-                    for k in numeric_setpoint_keys:
-                        avg_setpoints_numeric[k] = round(avg_setpoints_numeric[k] / count, 3)
+                    logger.info(f"📊 [MILA Archive] {len(rows)} rows split into {len(order_groups)} order group(s): {list(order_groups.keys())}")
 
-                    # 6. Final setpoints: last row values + averaged numeric fields
-                    # ✅ Include ALL fields from last row (including new Bool fields)
-                    last_row = rows[-1]
-                    final_setpoints = {}
-                    for k, v in last_row['setpoints_produced'].items():
-                        if k in avg_setpoints_numeric:
-                            # Use averaged value for numeric fields (%, t/h)
-                            final_setpoints[k] = avg_setpoints_numeric[k]
-                        else:
-                            # Use last value for boolean and other fields
-                            final_setpoints[k] = v
+                    for group_order_name, group_rows in order_groups.items():
+                        count = len(group_rows)
+                        last_row = group_rows[-1]
+                        actual_order_name = None if group_order_name == '__idle__' else group_order_name
 
-                    # 7. ✅ Bran Receiver: Cumulative counters (NOT flow rates!)
-                    # These values are ALREADY in kg and are cumulative totals from PLC
-                    # We do NOT sum them or convert them - just store the LAST value!
-                    last_row = rows[-1]
-                    
-                    # Store the LAST cumulative value for bran_receiver (not summed over the period!)
-                    final_bran_receiver = {}
-                    for k, v in last_row['bran_receiver'].items():
-                        if isinstance(v, (int, float)):
-                            final_bran_receiver[k] = round(float(v), 3)  # Just last value, already in kg
+                        max_flow = max(r['yield_log'].get("Yield Max Flow (kg/s)", 0) for r in group_rows)
+                        min_flow = min(r['yield_log'].get("Yield Min Flow (kg/s)", 0) for r in group_rows)
 
-                    # 8. ✅ Receiver: FLOW RATE in kg/s - convert to total kg for the 30-minute period!
-                    # Calculate time span
-                    first_time = min(r.get('created_at') for r in rows)
-                    last_time = max(r.get('created_at') for r in rows)
-                    time_span_seconds = (last_time - first_time).total_seconds() if last_time and first_time else 1800
-                    
-                    if time_span_seconds < 60:
-                        time_span_seconds = 1800  # Fallback to 30 minutes
-                    
-                    logger.info(f"📊 [MILA Archive] Records: {len(rows)} over {time_span_seconds:.0f}s")
-                    
-                    # SUM receiver flow rates (stored in kg/s, convert to total kg)
-                    receiver_totals = defaultdict(lambda: {"bin_id": None, "material_code": None, "material_name": None, "sum_kg_s": 0.0})
-                    
-                    for row in rows:
-                        receivers = row.get("receiver", [])
-                        if isinstance(receivers, str):
-                            receivers = json.loads(receivers or "[]")
-                        
-                        for rec in receivers:
-                            bin_id = rec.get("bin_id")
-                            code = rec.get("material_code")
-                            name = rec.get("material_name")
-                            kg_per_s = float(rec.get("weight_kg", 0))  # Already in kg/s from live monitor
-                        
-                            key = f"{bin_id}-{code}-{name}"
-                            receiver_totals[key]["bin_id"] = bin_id
-                            receiver_totals[key]["material_code"] = code
-                            receiver_totals[key]["material_name"] = name
-                            receiver_totals[key]["sum_kg_s"] += kg_per_s  # SUM all kg/s values
-                    
-                    # Convert summed kg/s to total kg for the 30-minute period
-                    final_receiver = []
-                    for val in receiver_totals.values():
-                        avg_kg_s = val["sum_kg_s"] / len(rows)  # Average flow rate
-                        total_kg = avg_kg_s * time_span_seconds  # Total kg over the time span
-                        
-                        final_receiver.append({
-                            "bin_id": val["bin_id"],
-                            "material_code": val["material_code"],
-                            "material_name": val["material_name"],
-                            "weight_kg": round(total_kg, 3)
-                        })
+                        avg_yield_pct = defaultdict(float)
+                        yield_pct_keys = set()
+                        mila_flour1_sum = 0.0
+                        for r in group_rows:
+                            for k, v in r['yield_log'].items():
+                                if "MILA_Flour1" in k:
+                                    if isinstance(v, (int, float)):
+                                        mila_flour1_sum += v
+                                    continue
+                                if isinstance(v, (int, float)) and "%" in k:
+                                    avg_yield_pct[k] += v
+                                    yield_pct_keys.add(k)
+                        for k in yield_pct_keys:
+                            avg_yield_pct[k] = round(avg_yield_pct[k] / count, 3)
 
-                    # 9. ✅ Produced weight: Cumulative counter (NOT a flow rate!)
-                    last_produced = float(last_row.get("produced_weight", 0))
-                    total_produced_weight = round(last_produced, 3)  # Last value only, already in kg
+                        avg_setpoints_numeric = defaultdict(float)
+                        numeric_setpoint_keys = set()
+                        for r in group_rows:
+                            for k, v in r['setpoints_produced'].items():
+                                if isinstance(v, (int, float)) and ("%" in k or "t/h" in k):
+                                    avg_setpoints_numeric[k] += v
+                                    numeric_setpoint_keys.add(k)
+                        for k in numeric_setpoint_keys:
+                            avg_setpoints_numeric[k] = round(avg_setpoints_numeric[k] / count, 3)
 
-                    # 10. Final yield log
-                    final_yield_log = {
-                        "Yield Max Flow (kg/s)": round(max_flow, 3),
-                        "Yield Min Flow (kg/s)": round(min_flow, 3),
-                        **avg_yield_pct
-                    }
+                        final_setpoints = {}
+                        for k, v in last_row['setpoints_produced'].items():
+                            if k in avg_setpoints_numeric:
+                                final_setpoints[k] = avg_setpoints_numeric[k]
+                            else:
+                                final_setpoints[k] = v
 
-                    # ✅ Add MILA_Flour1 (%) if it was tracked separately
-                    if mila_flour1_sum > 0 and count > 0:
-                        final_yield_log["MILA_Flour1 (%)"] = round(mila_flour1_sum / count, 3)
+                        final_bran_receiver = {}
+                        for k, v in last_row['bran_receiver'].items():
+                            if isinstance(v, (int, float)):
+                                final_bran_receiver[k] = round(float(v), 3)
 
-                    # 11. Extract real order start/end times from live rows
-                    start_times = [r.get('order_start_time') for r in rows if r.get('order_start_time')]
-                    end_times = [r.get('order_end_time') for r in rows if r.get('order_end_time')]
-                    archive_order_start = min(start_times) if start_times else None
-                    archive_order_end = max(end_times) if end_times else None
+                        g_first_time = min(r.get('created_at') for r in group_rows)
+                        g_last_time = max(r.get('created_at') for r in group_rows)
+                        time_span_seconds = (g_last_time - g_first_time).total_seconds() if g_last_time and g_first_time else 1800
+                        if time_span_seconds < 60:
+                            time_span_seconds = 1800
 
-                    # 12. ✅ STEP 2: INSERT aggregated data into archive table (mila_monitor_logs_archive)
-                    cur.execute("""
-                        INSERT INTO mila_monitor_logs_archive (
-                            order_name, status, receiver,
-                            bran_receiver, yield_log, setpoints_produced,
-                            produced_weight, created_at,
-                            order_start_time, order_end_time
-                        )
-                        VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
-                                %s::jsonb, %s, %s, %s, %s)
-                    """, (
-                        last_row["order_name"],
-                        last_row["status"],
-                        json.dumps(final_receiver),
-                        json.dumps(final_bran_receiver),
-                        json.dumps(final_yield_log),
-                        json.dumps(final_setpoints),
-                        total_produced_weight,
-                        archive_cutoff,
-                        archive_order_start,
-                        archive_order_end,
-                    ))
+                        receiver_totals = defaultdict(lambda: {"bin_id": None, "material_code": None, "material_name": None, "sum_kg_s": 0.0})
+                        for row in group_rows:
+                            receivers = row.get("receiver", [])
+                            if isinstance(receivers, str):
+                                receivers = json.loads(receivers or "[]")
+                            for rec in receivers:
+                                bin_id = rec.get("bin_id")
+                                code = rec.get("material_code")
+                                name = rec.get("material_name")
+                                kg_per_s = float(rec.get("weight_kg", 0))
+                                key = f"{bin_id}-{code}-{name}"
+                                receiver_totals[key]["bin_id"] = bin_id
+                                receiver_totals[key]["material_code"] = code
+                                receiver_totals[key]["material_name"] = name
+                                receiver_totals[key]["sum_kg_s"] += kg_per_s
 
-                    # 12. ✅ STEP 3: DELETE the archived data from live table (mila_monitor_logs)
-                    # CRITICAL: Delete ONLY the data we just archived to prevent double counting
-                    # Use the SAME cutoff timestamp to ensure we delete exactly what we archived
+                        final_receiver = []
+                        for val in receiver_totals.values():
+                            avg_kg_s = val["sum_kg_s"] / count
+                            total_kg = avg_kg_s * time_span_seconds
+                            final_receiver.append({
+                                "bin_id": val["bin_id"],
+                                "material_code": val["material_code"],
+                                "material_name": val["material_name"],
+                                "weight_kg": round(total_kg, 3)
+                            })
+
+                        total_produced_weight = round(float(last_row.get("produced_weight", 0)), 3)
+
+                        final_yield_log = {
+                            "Yield Max Flow (kg/s)": round(max_flow, 3),
+                            "Yield Min Flow (kg/s)": round(min_flow, 3),
+                            **avg_yield_pct
+                        }
+                        if mila_flour1_sum > 0 and count > 0:
+                            final_yield_log["MILA_Flour1 (%)"] = round(mila_flour1_sum / count, 3)
+
+                        start_times = [r.get('order_start_time') for r in group_rows if r.get('order_start_time')]
+                        end_times = [r.get('order_end_time') for r in group_rows if r.get('order_end_time')]
+                        archive_order_start = min(start_times) if start_times else None
+                        archive_order_end = max(end_times) if end_times else None
+
+                        cur.execute("""
+                            INSERT INTO mila_monitor_logs_archive (
+                                order_name, status, receiver,
+                                bran_receiver, yield_log, setpoints_produced,
+                                produced_weight, created_at,
+                                order_start_time, order_end_time
+                            )
+                            VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
+                                    %s::jsonb, %s, %s, %s, %s)
+                        """, (
+                            actual_order_name,
+                            last_row["status"],
+                            json.dumps(final_receiver),
+                            json.dumps(final_bran_receiver),
+                            json.dumps(final_yield_log),
+                            json.dumps(final_setpoints),
+                            total_produced_weight,
+                            archive_cutoff,
+                            archive_order_start,
+                            archive_order_end,
+                        ))
+                        logger.info(f"   📥 Archived {count} rows for order {actual_order_name} | start={archive_order_start} end={archive_order_end}")
+
+                    # DELETE all archived live rows in one go
                     cur.execute("""
                         DELETE FROM mila_monitor_logs
                         WHERE created_at < %s
                     """, (archive_cutoff,))
                     deleted_count = cur.rowcount
-                    
-                    # Commit both INSERT and DELETE in the same transaction
+
                     conn.commit()
-                    
+
                     logger.info(f"✅ MILA Archive Complete:")
-                    logger.info(f"   📥 Moved {len(rows)} rows from mila_monitor_logs (live) → mila_monitor_logs_archive (archive)")
+                    logger.info(f"   📥 Moved {len(rows)} rows ({len(order_groups)} order group(s)) from live → archive")
                     logger.info(f"   🗑️  Deleted {deleted_count} rows from mila_monitor_logs (live table)")
-                    logger.info(f"   📊 Order: {last_row['order_name']} | Produced Weight: {total_produced_weight} kg | Archive Time: {archive_time}")
-                    
-                    # ✅ Verify deletion was successful
+
                     if deleted_count != len(rows):
                         logger.warning(f"⚠️ [MILA Archive] WARNING: Archived {len(rows)} rows but deleted {deleted_count} rows!")
-                        logger.warning(f"⚠️ This mismatch may cause double counting in next archive cycle!")
 
         except Exception as e:
             logger.error(f"❌ MILA archive error: {e}", exc_info=True)

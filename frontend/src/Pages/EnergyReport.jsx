@@ -5,7 +5,6 @@ import asmLogo from "../Assets/Asm_Logo.png";
 import salalahLogo from "../Assets/salalah_logo.png";
 import { FaBolt, FaChargingStation, FaPlug, FaBatteryThreeQuarters } from "react-icons/fa";
 import MultiLineChart from "../Components/charts/MultiLineChart";
-import GroupedBarChart from "../Components/charts/GroupedBarChart";
 import axios from 'axios';
 
 const MACHINES = ["All", "C2", "M20", "M21", "M22", "M23", "M24"];
@@ -122,6 +121,17 @@ const EnergyReport = () => {
         const selectedDate = new Date(startDate);
         const isToday = selectedDate.toDateString() === today.toDateString();
 
+        // Daily table: expand to full month containing selected date
+        const dailyRangeStart = new Date(selectedDate.getFullYear(), selectedDate.getMonth(), 1)
+          .toISOString().split('T')[0];
+        const dailyRangeEnd = new Date(selectedDate.getFullYear(), selectedDate.getMonth() + 1, 0)
+          .toISOString().split('T')[0];
+
+        // Monthly table/chart: go back 12 months from selected date
+        const monthlyRangeStart = new Date(selectedDate.getFullYear() - 1, selectedDate.getMonth(), 1)
+          .toISOString().split('T')[0];
+        const monthlyRangeEnd = endDate.split('T')[0];
+
         // Fire all requests in parallel
         const [kpiRes, todayRes, hourlyRes, monthlyRes, dailyRes, trendRes, peakRes] = await Promise.allSettled([
           axios.get('/api/energy/historical', {
@@ -134,10 +144,10 @@ const EnergyReport = () => {
             params: { block_name: machineParam, start_datetime: effStart, end_datetime: effEnd }
           }),
           axios.get('/api/energy/monthly', {
-            params: { block_name: machineParam, start_month: startDate.split('T')[0], end_month: endDate.split('T')[0] }
+            params: { block_name: machineParam, start_month: monthlyRangeStart, end_month: monthlyRangeEnd }
           }),
           axios.get('/api/energy/daily', {
-            params: { block_name: machineParam, start_date: startDate.split('T')[0], end_date: endDate.split('T')[0] }
+            params: { block_name: machineParam, start_date: dailyRangeStart, end_date: dailyRangeEnd }
           }),
           axios.get('/get-energy-history', {
             params: { block_name: machineParam, start_date: effStart, end_date: effEnd, limit: 200 }
@@ -200,19 +210,29 @@ const EnergyReport = () => {
   }, [selectedMachine, startDate, endDate, selectedShift]);
 
 
-  // Chart Data Preparation
+  // Chart Data Preparation — dual-line (Energy + Voltage) for hourly & monthly
   const hourlyChartData = {
-    labels: hourlyData.map(d => {
-        // Format "YYYY-MM-DD HH:MM:SS" to "HH:MM"
-        return new Date(d.hour).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-    }),
+    labels: hourlyData.map(d =>
+      new Date(d.hour).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    ),
     datasets: [
       {
         label: 'Energy (kWh)',
         data: hourlyData.map(d => d.energy),
-        backgroundColor: 'rgba(59, 130, 246, 0.7)',
         borderColor: 'rgb(59, 130, 246)',
-        borderWidth: 1,
+        backgroundColor: 'rgba(59, 130, 246, 0.1)',
+        tension: 0.4,
+        fill: false,
+        yAxisID: 'y',
+      },
+      {
+        label: 'Avg Voltage (V)',
+        data: hourlyData.map(d => d.avg_voltage),
+        borderColor: 'rgb(245, 158, 11)',
+        backgroundColor: 'rgba(245, 158, 11, 0.1)',
+        tension: 0.4,
+        fill: false,
+        yAxisID: 'y1',
       }
     ]
   };
@@ -232,16 +252,27 @@ const EnergyReport = () => {
   };
 
   const monthlyChartData = {
-    labels: monthlyData.map(d => {
-         return new Date(d.month).toLocaleDateString([], {month: 'short', year: 'numeric'});
-    }),
+    labels: monthlyData.map(d =>
+      new Date(d.month).toLocaleDateString([], { month: 'short', year: 'numeric' })
+    ),
     datasets: [
       {
-        label: 'Monthly Energy (kWh)',
+        label: 'Energy (kWh)',
         data: monthlyData.map(d => d.energy),
-        backgroundColor: 'rgba(245, 158, 11, 0.7)',
+        borderColor: 'rgb(59, 130, 246)',
+        backgroundColor: 'rgba(59, 130, 246, 0.1)',
+        tension: 0.4,
+        fill: false,
+        yAxisID: 'y',
+      },
+      {
+        label: 'Avg Voltage (V)',
+        data: monthlyData.map(d => d.avg_voltage),
         borderColor: 'rgb(245, 158, 11)',
-        borderWidth: 1
+        backgroundColor: 'rgba(245, 158, 11, 0.1)',
+        tension: 0.4,
+        fill: false,
+        yAxisID: 'y1',
       }
     ]
   };
@@ -443,11 +474,11 @@ const EnergyReport = () => {
 
             {/* Charts Section */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-              {/* Hourly Energy Chart */}
+              {/* Hourly Energy & Voltage Chart */}
               <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 shadow-sm w-full">
-                <h3 className="text-lg font-semibold text-gray-700 mb-4">Hourly Energy Consumption</h3>
+                <h3 className="text-lg font-semibold text-gray-700 mb-4">Hourly Energy & Voltage Trend</h3>
                 <div className="h-80 w-full">
-                  <GroupedBarChart data={hourlyChartData} />
+                  <MultiLineChart data={hourlyChartData} title="Energy vs Voltage (Hourly)" dualAxis />
                 </div>
               </div>
 
@@ -455,16 +486,16 @@ const EnergyReport = () => {
               <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 shadow-sm w-full">
                 <h3 className="text-lg font-semibold text-gray-700 mb-4">Power Consumption Trend</h3>
                 <div className="h-80 w-full">
-                  <MultiLineChart data={powerTrendChartData} />
+                  <MultiLineChart data={powerTrendChartData} title="Power (kW)" />
                 </div>
               </div>
             </div>
 
             {/* Monthly Trend Section */}
             <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 shadow-sm w-full">
-              <h3 className="text-lg font-semibold text-gray-700 mb-4">Monthly Energy Trend</h3>
+              <h3 className="text-lg font-semibold text-gray-700 mb-4">Monthly Energy & Voltage Trend</h3>
               <div className="h-80 w-full">
-                <GroupedBarChart data={monthlyChartData} />
+                <MultiLineChart data={monthlyChartData} title="Energy vs Voltage (Monthly)" dualAxis />
               </div>
             </div>
           </div>
@@ -492,53 +523,50 @@ const EnergyReport = () => {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full text-sm text-left text-gray-500 border border-gray-200 rounded-lg">
-                <thead className="text-xs text-gray-700 uppercase bg-gray-100">
-                  <tr>
-                    <th className="px-6 py-3 border-b">
-                      {tableView === 'hourly' ? 'Time' : 
-                       tableView === 'daily' ? 'Date' : 'Month'}
-                    </th>
-                    <th className="px-6 py-3 border-b text-right">Energy (kWh)</th>
-                    {tableView === 'hourly' && <th className="px-6 py-3 border-b text-right">Avg Power (kW)</th>}
-                    <th className="px-6 py-3 border-b text-right">Cost (OMR)</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(tableView === 'hourly' ? hourlyData : 
-                    tableView === 'daily' ? dailyData : 
-                    monthlyData).map((row, index) => (
-                    <tr key={index} className="bg-white border-b hover:bg-gray-50">
-                      <td className="px-6 py-3 font-medium text-gray-900">
-                        {tableView === 'hourly' ? new Date(row.hour).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) :
-                         tableView === 'daily' ? row.date :
-                         new Date(row.month).toLocaleDateString([], {month: 'short', year: 'numeric'})}
-                      </td>
-                      <td className="px-6 py-3 text-right">{parseFloat(row.energy || 0).toFixed(2)}</td>
-                      {tableView === 'hourly' && <td className="px-6 py-3 text-right">{parseFloat(row.avg_power || 0).toFixed(2)}</td>}
-                      <td className="px-6 py-3 text-right">
-                          {(parseFloat(row.energy || 0) * 0.35).toFixed(3)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-                <tfoot className="bg-gray-100 font-semibold text-gray-900">
-                  <tr>
-                    <td className="px-6 py-3">Total</td>
-                    <td className="px-6 py-3 text-right">
-                      {(tableView === 'hourly' ? hourlyData : 
-                        tableView === 'daily' ? dailyData : 
-                        monthlyData).reduce((acc, curr) => acc + parseFloat(curr.energy || 0), 0).toFixed(2)}
-                    </td>
-                    {tableView === 'hourly' && <td className="px-6 py-3 text-right">-</td>}
-                    <td className="px-6 py-3 text-right">
-                      {(tableView === 'hourly' ? hourlyData : 
-                        tableView === 'daily' ? dailyData : 
-                        monthlyData).reduce((acc, curr) => acc + (parseFloat(curr.energy || 0) * 0.35), 0).toFixed(3)}
-                    </td>
-                  </tr>
-                </tfoot>
-              </table>
+              {(() => {
+                const rows = tableView === 'hourly' ? hourlyData :
+                             tableView === 'daily'  ? dailyData  : monthlyData;
+                const totalEnergy = rows.reduce((acc, r) => acc + parseFloat(r.energy || 0), 0);
+                return (
+                  <table className="w-full text-sm text-left text-gray-500 border border-gray-200 rounded-lg">
+                    <thead className="text-xs text-gray-700 uppercase bg-gray-100">
+                      <tr>
+                        <th className="px-6 py-3 border-b">
+                          {tableView === 'hourly' ? 'Time' : tableView === 'daily' ? 'Date' : 'Month'}
+                        </th>
+                        <th className="px-6 py-3 border-b text-right">Energy (kWh)</th>
+                        {tableView === 'hourly' && <th className="px-6 py-3 border-b text-right">Avg Power (kW)</th>}
+                        <th className="px-6 py-3 border-b text-right">Avg Voltage (V)</th>
+                        <th className="px-6 py-3 border-b text-right">Cost (OMR)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map((row, index) => (
+                        <tr key={index} className="bg-white border-b hover:bg-gray-50">
+                          <td className="px-6 py-3 font-medium text-gray-900">
+                            {tableView === 'hourly' ? new Date(row.hour).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) :
+                             tableView === 'daily'  ? row.date :
+                             new Date(row.month).toLocaleDateString([], {month: 'short', year: 'numeric'})}
+                          </td>
+                          <td className="px-6 py-3 text-right">{parseFloat(row.energy || 0).toFixed(2)}</td>
+                          {tableView === 'hourly' && <td className="px-6 py-3 text-right">{parseFloat(row.avg_power || 0).toFixed(2)}</td>}
+                          <td className="px-6 py-3 text-right">{parseFloat(row.avg_voltage || 0).toFixed(2)}</td>
+                          <td className="px-6 py-3 text-right">{(parseFloat(row.energy || 0) * 0.35).toFixed(3)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot className="bg-gray-100 font-semibold text-gray-900">
+                      <tr>
+                        <td className="px-6 py-3">Total</td>
+                        <td className="px-6 py-3 text-right">{totalEnergy.toFixed(2)}</td>
+                        {tableView === 'hourly' && <td className="px-6 py-3 text-right">-</td>}
+                        <td className="px-6 py-3 text-right">-</td>
+                        <td className="px-6 py-3 text-right">{(totalEnergy * 0.35).toFixed(3)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                );
+              })()}
             </div>
           </div>
         )}

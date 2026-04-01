@@ -123,8 +123,10 @@ These are applied automatically on container startup via `migrate_db.py`.
 | `backend/migrate_db.py` | **New** — database migration script |
 | `backend/entrypoint.sh` | **New** — runs migration before app starts |
 | `backend/Dockerfile` | Changed `CMD` → `ENTRYPOINT ["./entrypoint.sh"]` |
-| `backend/app.py` | Live monitor + archive process updated |
+| `backend/app.py` | Live monitor + archive process (group by order_name) |
 | `backend/orders_bp.py` | Summary API updated |
+| `backend/export_mila_data.py` | Added `order_start_time` / `order_end_time` to Excel export |
+| `frontend/src/Pages/JobLogs.jsx` | MIL-A job list uses real order times |
 
 ---
 
@@ -219,32 +221,72 @@ if mila_order_ending:
     mila_session_ended = None
 ```
 
-### 4. Archive Process (`app.py`)
+### 4. Archive Process (`app.py`) — Group by order_name
 
-Extracts real times from live rows before compressing:
+A 30-minute archive window can contain rows from **multiple orders** (e.g. MILA771 ending
+and MILA772 starting). The archive now **groups by `order_name`** before inserting, creating
+one archive row per order per window. This prevents mixing start/end times across orders.
 
 ```python
-# Extract real order start/end times from live rows
-start_times = [r.get('order_start_time') for r in rows if r.get('order_start_time')]
-end_times = [r.get('order_end_time') for r in rows if r.get('order_end_time')]
-archive_order_start = min(start_times) if start_times else None
-archive_order_end = max(end_times) if end_times else None
+# Group rows by order_name
+order_groups = OrderedDict()
+for r in rows:
+    oname = r.get('order_name') or '__idle__'
+    order_groups.setdefault(oname, []).append(r)
 
-cur.execute("""
-    INSERT INTO mila_monitor_logs_archive (
-        order_name, status, receiver, bran_receiver, yield_log,
-        setpoints_produced, produced_weight, created_at,
-        order_start_time, order_end_time          -- NEW columns
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-""", (
-    ...,
-    archive_cutoff,          # created_at stays as 30-min boundary (backward compat)
-    archive_order_start,     # ← real start time from live rows
-    archive_order_end,       # ← real end time from live rows (NULL if still running)
-))
+# Process each group independently
+for group_order_name, group_rows in order_groups.items():
+    # ... all aggregation (yield, bran, setpoints, receiver) runs per group ...
+
+    start_times = [r.get('order_start_time') for r in group_rows if r.get('order_start_time')]
+    end_times = [r.get('order_end_time') for r in group_rows if r.get('order_end_time')]
+    archive_order_start = min(start_times) if start_times else None
+    archive_order_end = max(end_times) if end_times else None
+
+    cur.execute("""
+        INSERT INTO mila_monitor_logs_archive (
+            order_name, status, receiver, bran_receiver, yield_log,
+            setpoints_produced, produced_weight, created_at,
+            order_start_time, order_end_time
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """, (
+        actual_order_name,       # ← correct order for THIS group
+        ...,
+        archive_cutoff,          # created_at stays as 30-min boundary (backward compat)
+        archive_order_start,     # ← real start time from THIS order's rows only
+        archive_order_end,       # ← real end time from THIS order's rows only
+    ))
+
+# DELETE all archived live rows in one go (after all groups inserted)
+cur.execute("DELETE FROM mila_monitor_logs WHERE created_at < %s", (archive_cutoff,))
 ```
 
-### 5. Summary API (`orders_bp.py`)
+### 5. Frontend Job Logs (`JobLogs.jsx`) — MIL-A only
+
+The `buildJobList` function now uses `order_start_time` / `order_end_time` from archive rows
+for MIL-A orders, with fallback to `created_at` for old data:
+
+```javascript
+// For MIL-A: use real order_start_time / order_end_time from archive rows
+if (reportType === 'MILL-A') {
+  Object.values(byOrder).forEach((order) => {
+    let realStart = null;
+    let realEnd = null;
+    order.rows.forEach((row) => {
+      const st = row.order_start_time ? parseArchiveDate(row.order_start_time) : null;
+      const et = row.order_end_time ? parseArchiveDate(row.order_end_time) : null;
+      if (st && (!realStart || st < realStart)) realStart = st;
+      if (et && (!realEnd || et > realEnd)) realEnd = et;
+    });
+    if (realStart) order.startDate = realStart;
+    if (realEnd) order.endDate = realEnd;
+  });
+}
+```
+
+This change only affects MIL-A on the Job Logs page. FCL, SCL, FTRA are untouched.
+
+### 6. Summary API (`orders_bp.py`)
 
 Uses new columns with fallback for old data:
 

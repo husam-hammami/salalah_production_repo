@@ -337,7 +337,8 @@ def get_hourly_energy_data(block_name, start_datetime, end_datetime):
                         SELECT 
                             date_trunc('hour', timestamp) as hour,
                             MAX(total_active_energy) - MIN(total_active_energy) as energy,
-                            AVG(effective_power) as avg_power
+                            AVG(effective_power) as avg_power,
+                            AVG(COALESCE(average_voltage, voltage_l1_l2)) as avg_voltage
                         FROM energy_readings
                         WHERE block_name = %s 
                           AND timestamp >= %s AND timestamp <= %s
@@ -346,12 +347,14 @@ def get_hourly_energy_data(block_name, start_datetime, end_datetime):
                     """, (block_name, start_datetime, end_datetime))
                 else:
                     cursor.execute("""
-                        SELECT hour, SUM(energy) as energy, AVG(avg_power) as avg_power FROM (
+                        SELECT hour, SUM(energy) as energy, AVG(avg_power) as avg_power,
+                               AVG(avg_voltage) as avg_voltage FROM (
                             SELECT 
                                 date_trunc('hour', timestamp) as hour,
                                 block_name,
                                 MAX(total_active_energy) - MIN(total_active_energy) as energy,
-                                AVG(effective_power) as avg_power
+                                AVG(effective_power) as avg_power,
+                                AVG(COALESCE(average_voltage, voltage_l1_l2)) as avg_voltage
                             FROM energy_readings
                             WHERE timestamp >= %s AND timestamp <= %s
                             GROUP BY date_trunc('hour', timestamp), block_name
@@ -364,7 +367,8 @@ def get_hourly_energy_data(block_name, start_datetime, end_datetime):
                 return [{
                     'hour': str(row['hour']),
                     'energy': round(float(row['energy']), 3),
-                    'avg_power': round(float(row['avg_power']), 3) if row.get('avg_power') else 0
+                    'avg_power': round(float(row['avg_power']), 3) if row.get('avg_power') else 0,
+                    'avg_voltage': round(float(row['avg_voltage']), 2) if row.get('avg_voltage') else 0
                 } for row in results]
     except Exception as e:
         logger.error(f"Error getting hourly energy: {e}")
@@ -381,7 +385,8 @@ def get_daily_energy_data(block_name, start_date, end_date):
                     cursor.execute("""
                         SELECT 
                             DATE(timestamp) as date,
-                            MAX(total_active_energy) - MIN(total_active_energy) as energy
+                            MAX(total_active_energy) - MIN(total_active_energy) as energy,
+                            AVG(COALESCE(average_voltage, voltage_l1_l2)) as avg_voltage
                         FROM energy_readings
                         WHERE block_name = %s 
                           AND DATE(timestamp) >= %s AND DATE(timestamp) <= %s
@@ -390,11 +395,12 @@ def get_daily_energy_data(block_name, start_date, end_date):
                     """, (block_name, start_date, end_date))
                 else:
                     cursor.execute("""
-                        SELECT date, SUM(energy) as energy FROM (
+                        SELECT date, SUM(energy) as energy, AVG(avg_voltage) as avg_voltage FROM (
                             SELECT 
                                 DATE(timestamp) as date,
                                 block_name,
-                                MAX(total_active_energy) - MIN(total_active_energy) as energy
+                                MAX(total_active_energy) - MIN(total_active_energy) as energy,
+                                AVG(COALESCE(average_voltage, voltage_l1_l2)) as avg_voltage
                             FROM energy_readings
                             WHERE DATE(timestamp) >= %s AND DATE(timestamp) <= %s
                             GROUP BY DATE(timestamp), block_name
@@ -407,7 +413,8 @@ def get_daily_energy_data(block_name, start_date, end_date):
                 return [{
                     'date': str(row['date']), 
                     'energy': round(float(row['energy']), 3),
-                    'cost': round(float(row['energy']) * energy_rate, 2)
+                    'cost': round(float(row['energy']) * energy_rate, 2),
+                    'avg_voltage': round(float(row['avg_voltage']), 2) if row.get('avg_voltage') else 0
                 } for row in results]
     except Exception as e:
         logger.error(f"Error getting daily energy: {e}")
@@ -425,7 +432,8 @@ def get_monthly_energy_data(block_name, start_month, end_month):
                     cursor.execute("""
                         SELECT 
                             date_trunc('month', timestamp)::date as month,
-                            MAX(total_active_energy) - MIN(total_active_energy) as energy
+                            MAX(total_active_energy) - MIN(total_active_energy) as energy,
+                            AVG(COALESCE(average_voltage, voltage_l1_l2)) as avg_voltage
                         FROM energy_readings
                         WHERE block_name = %s 
                           AND date_trunc('month', timestamp) >= date_trunc('month', %s::date)
@@ -435,11 +443,12 @@ def get_monthly_energy_data(block_name, start_month, end_month):
                     """, (block_name, start_month, end_month))
                 else:
                     cursor.execute("""
-                        SELECT month, SUM(energy) as energy FROM (
+                        SELECT month, SUM(energy) as energy, AVG(avg_voltage) as avg_voltage FROM (
                             SELECT 
                                 date_trunc('month', timestamp)::date as month,
                                 block_name,
-                                MAX(total_active_energy) - MIN(total_active_energy) as energy
+                                MAX(total_active_energy) - MIN(total_active_energy) as energy,
+                                AVG(COALESCE(average_voltage, voltage_l1_l2)) as avg_voltage
                             FROM energy_readings
                             WHERE date_trunc('month', timestamp) >= date_trunc('month', %s::date)
                               AND date_trunc('month', timestamp) <= date_trunc('month', %s::date)
@@ -454,7 +463,8 @@ def get_monthly_energy_data(block_name, start_month, end_month):
                 return [{
                     'month': str(row['month']), 
                     'energy': round(float(row['energy']), 3),
-                    'cost': round(float(row['energy']) * energy_rate, 2)
+                    'cost': round(float(row['energy']) * energy_rate, 2),
+                    'avg_voltage': round(float(row['avg_voltage']), 2) if row.get('avg_voltage') else 0
                 } for row in results]
     except Exception as e:
         logger.error(f"Error getting monthly energy: {e}")

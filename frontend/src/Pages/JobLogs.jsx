@@ -289,6 +289,23 @@ function buildJobList(archiveData, reportType) {
       }
     }
   });
+
+  // For MIL-A: use real order_start_time / order_end_time from archive rows (falls back to created_at for old data)
+  if (reportType === 'MILL-A') {
+    Object.values(byOrder).forEach((order) => {
+      let realStart = null;
+      let realEnd = null;
+      order.rows.forEach((row) => {
+        const st = row.order_start_time ? parseArchiveDate(row.order_start_time) : null;
+        const et = row.order_end_time ? parseArchiveDate(row.order_end_time) : null;
+        if (st && (!realStart || st < realStart)) realStart = st;
+        if (et && (!realEnd || et > realEnd)) realEnd = et;
+      });
+      if (realStart) order.startDate = realStart;
+      if (realEnd) order.endDate = realEnd;
+    });
+  }
+
   const list = Object.values(byOrder)
     .sort((a, b) => (b.endDate && a.endDate ? b.endDate - a.endDate : 0))
     .slice(0, 100)

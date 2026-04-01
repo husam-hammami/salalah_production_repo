@@ -204,17 +204,25 @@ def init_db():
 # =============================================================================
 
 def get_start_reading(block_name, start_datetime):
-    """Get first reading for a block_name at or after start_datetime"""
+    """Get first reading for a block_name at or after start_datetime. If block_name is None, gets across all machines."""
     from app import get_db_connection
     try:
         with closing(get_db_connection()) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute("""
-                    SELECT * FROM energy_readings
-                    WHERE block_name = %s AND timestamp >= %s
-                    ORDER BY timestamp ASC
-                    LIMIT 1
-                """, (block_name, start_datetime))
+                if block_name:
+                    cursor.execute("""
+                        SELECT * FROM energy_readings
+                        WHERE block_name = %s AND timestamp >= %s
+                        ORDER BY timestamp ASC
+                        LIMIT 1
+                    """, (block_name, start_datetime))
+                else:
+                    cursor.execute("""
+                        SELECT * FROM energy_readings
+                        WHERE timestamp >= %s
+                        ORDER BY timestamp ASC
+                        LIMIT 1
+                    """, (start_datetime,))
                 result = cursor.fetchone()
                 return dict(result) if result else None
     except Exception as e:
@@ -222,17 +230,25 @@ def get_start_reading(block_name, start_datetime):
         return None
 
 def get_end_reading(block_name, end_datetime):
-    """Get last reading for a block_name at or before end_datetime"""
+    """Get last reading for a block_name at or before end_datetime. If block_name is None, gets across all machines."""
     from app import get_db_connection
     try:
         with closing(get_db_connection()) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute("""
-                    SELECT * FROM energy_readings
-                    WHERE block_name = %s AND timestamp <= %s
-                    ORDER BY timestamp DESC
-                    LIMIT 1
-                """, (block_name, end_datetime))
+                if block_name:
+                    cursor.execute("""
+                        SELECT * FROM energy_readings
+                        WHERE block_name = %s AND timestamp <= %s
+                        ORDER BY timestamp DESC
+                        LIMIT 1
+                    """, (block_name, end_datetime))
+                else:
+                    cursor.execute("""
+                        SELECT * FROM energy_readings
+                        WHERE timestamp <= %s
+                        ORDER BY timestamp DESC
+                        LIMIT 1
+                    """, (end_datetime,))
                 result = cursor.fetchone()
                 return dict(result) if result else None
     except Exception as e:
@@ -259,17 +275,23 @@ def calculate_energy_delta(start_reading, end_reading):
     }
 
 def calculate_avg_voltage(block_name, start_datetime, end_datetime):
-    """Calculate average voltage for time range - uses average_voltage column if available, otherwise falls back to voltage_l1_l2"""
+    """Calculate average voltage for time range. If block_name is None, averages across all machines."""
     from app import get_db_connection
     try:
         with closing(get_db_connection()) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                # Use average_voltage column if available, otherwise calculate from voltage_l1_l2
-                cursor.execute("""
-                    SELECT AVG(COALESCE(average_voltage, voltage_l1_l2)) as avg_voltage
-                    FROM energy_readings
-                    WHERE block_name = %s AND timestamp >= %s AND timestamp <= %s
-                """, (block_name, start_datetime, end_datetime))
+                if block_name:
+                    cursor.execute("""
+                        SELECT AVG(COALESCE(average_voltage, voltage_l1_l2)) as avg_voltage
+                        FROM energy_readings
+                        WHERE block_name = %s AND timestamp >= %s AND timestamp <= %s
+                    """, (block_name, start_datetime, end_datetime))
+                else:
+                    cursor.execute("""
+                        SELECT AVG(COALESCE(average_voltage, voltage_l1_l2)) as avg_voltage
+                        FROM energy_readings
+                        WHERE timestamp >= %s AND timestamp <= %s
+                    """, (start_datetime, end_datetime))
                 result = cursor.fetchone()
                 val = result['avg_voltage'] if result else None
                 return round(float(val), 2) if val is not None else None
@@ -278,16 +300,23 @@ def calculate_avg_voltage(block_name, start_datetime, end_datetime):
         return None
 
 def calculate_avg_power(block_name, start_datetime, end_datetime):
-    """Calculate average power for time range"""
+    """Calculate average power for time range. If block_name is None, averages across all machines."""
     from app import get_db_connection
     try:
         with closing(get_db_connection()) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute("""
-                    SELECT AVG(effective_power) as avg_power
-                    FROM energy_readings
-                    WHERE block_name = %s AND timestamp >= %s AND timestamp <= %s
-                """, (block_name, start_datetime, end_datetime))
+                if block_name:
+                    cursor.execute("""
+                        SELECT AVG(effective_power) as avg_power
+                        FROM energy_readings
+                        WHERE block_name = %s AND timestamp >= %s AND timestamp <= %s
+                    """, (block_name, start_datetime, end_datetime))
+                else:
+                    cursor.execute("""
+                        SELECT AVG(effective_power) as avg_power
+                        FROM energy_readings
+                        WHERE timestamp >= %s AND timestamp <= %s
+                    """, (start_datetime, end_datetime))
                 result = cursor.fetchone()
                 val = result['avg_power'] if result else None
                 return round(float(val), 2) if val is not None else None
@@ -295,47 +324,84 @@ def calculate_avg_power(block_name, start_datetime, end_datetime):
         logger.error(f"Error calculating avg power: {e}")
         return None
 
-def get_hourly_energy_data(block_name, date):
-    """Get hourly energy breakdown for a specific date using MAX - MIN delta"""
+def get_hourly_energy_data(block_name, start_datetime, end_datetime):
+    """Get hourly energy breakdown for a datetime range using SUM of per-machine deltas.
+    block_name=None aggregates across all machines."""
     from app import get_db_connection
     try:
-        logger.info(f"Fetching hourly energy for {block_name} on {date}")
+        logger.info(f"Fetching hourly energy for {block_name or 'ALL'} from {start_datetime} to {end_datetime}")
         with closing(get_db_connection()) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute("""
-                    SELECT 
-                        date_trunc('hour', timestamp) as hour,
-                        MAX(total_active_energy) - MIN(total_active_energy) as energy
-                    FROM energy_readings
-                    WHERE block_name = %s 
-                    AND DATE(timestamp) = %s
-                    GROUP BY date_trunc('hour', timestamp)
-                    ORDER BY hour
-                """, (block_name, date))
+                if block_name:
+                    cursor.execute("""
+                        SELECT 
+                            date_trunc('hour', timestamp) as hour,
+                            MAX(total_active_energy) - MIN(total_active_energy) as energy,
+                            AVG(effective_power) as avg_power
+                        FROM energy_readings
+                        WHERE block_name = %s 
+                          AND timestamp >= %s AND timestamp <= %s
+                        GROUP BY date_trunc('hour', timestamp)
+                        ORDER BY hour
+                    """, (block_name, start_datetime, end_datetime))
+                else:
+                    cursor.execute("""
+                        SELECT hour, SUM(energy) as energy, AVG(avg_power) as avg_power FROM (
+                            SELECT 
+                                date_trunc('hour', timestamp) as hour,
+                                block_name,
+                                MAX(total_active_energy) - MIN(total_active_energy) as energy,
+                                AVG(effective_power) as avg_power
+                            FROM energy_readings
+                            WHERE timestamp >= %s AND timestamp <= %s
+                            GROUP BY date_trunc('hour', timestamp), block_name
+                        ) sub
+                        GROUP BY hour
+                        ORDER BY hour
+                    """, (start_datetime, end_datetime))
                 results = cursor.fetchall()
                 logger.info(f"Found {len(results)} hourly records")
-                return [{'hour': str(row['hour']), 'energy': round(float(row['energy']), 3)} for row in results]
+                return [{
+                    'hour': str(row['hour']),
+                    'energy': round(float(row['energy']), 3),
+                    'avg_power': round(float(row['avg_power']), 3) if row.get('avg_power') else 0
+                } for row in results]
     except Exception as e:
         logger.error(f"Error getting hourly energy: {e}")
         return []
 
 def get_daily_energy_data(block_name, start_date, end_date):
-    """Get daily energy summary for date range using MAX - MIN delta"""
+    """Get daily energy summary for date range using SUM of per-machine deltas.
+    block_name=None aggregates across all machines."""
     from app import get_db_connection
     try:
         with closing(get_db_connection()) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute("""
-                    SELECT 
-                        DATE(timestamp) as date,
-                        MAX(total_active_energy) - MIN(total_active_energy) as energy
-                    FROM energy_readings
-                    WHERE block_name = %s 
-                    AND DATE(timestamp) >= %s 
-                    AND DATE(timestamp) <= %s
-                    GROUP BY DATE(timestamp)
-                    ORDER BY date
-                """, (block_name, start_date, end_date))
+                if block_name:
+                    cursor.execute("""
+                        SELECT 
+                            DATE(timestamp) as date,
+                            MAX(total_active_energy) - MIN(total_active_energy) as energy
+                        FROM energy_readings
+                        WHERE block_name = %s 
+                          AND DATE(timestamp) >= %s AND DATE(timestamp) <= %s
+                        GROUP BY DATE(timestamp)
+                        ORDER BY date
+                    """, (block_name, start_date, end_date))
+                else:
+                    cursor.execute("""
+                        SELECT date, SUM(energy) as energy FROM (
+                            SELECT 
+                                DATE(timestamp) as date,
+                                block_name,
+                                MAX(total_active_energy) - MIN(total_active_energy) as energy
+                            FROM energy_readings
+                            WHERE DATE(timestamp) >= %s AND DATE(timestamp) <= %s
+                            GROUP BY DATE(timestamp), block_name
+                        ) sub
+                        GROUP BY date
+                        ORDER BY date
+                    """, (start_date, end_date))
                 results = cursor.fetchall()
                 energy_rate = 0.35  # OMR per kWh
                 return [{
@@ -348,23 +414,40 @@ def get_daily_energy_data(block_name, start_date, end_date):
         return []
 
 def get_monthly_energy_data(block_name, start_month, end_month):
-    """Get monthly energy summary for month range using MAX - MIN delta"""
+    """Get monthly energy summary for month range using SUM of per-machine deltas.
+    block_name=None aggregates across all machines."""
     from app import get_db_connection
     try:
-        logger.info(f"Fetching monthly data for {block_name} from {start_month} to {end_month}")
+        logger.info(f"Fetching monthly data for {block_name or 'ALL'} from {start_month} to {end_month}")
         with closing(get_db_connection()) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute("""
-                    SELECT 
-                        date_trunc('month', timestamp)::date as month,
-                        MAX(total_active_energy) - MIN(total_active_energy) as energy
-                    FROM energy_readings
-                    WHERE block_name = %s 
-                    AND date_trunc('month', timestamp) >= date_trunc('month', %s::date)
-                    AND date_trunc('month', timestamp) <= date_trunc('month', %s::date)
-                    GROUP BY date_trunc('month', timestamp)
-                    ORDER BY month
-                """, (block_name, start_month, end_month))
+                if block_name:
+                    cursor.execute("""
+                        SELECT 
+                            date_trunc('month', timestamp)::date as month,
+                            MAX(total_active_energy) - MIN(total_active_energy) as energy
+                        FROM energy_readings
+                        WHERE block_name = %s 
+                          AND date_trunc('month', timestamp) >= date_trunc('month', %s::date)
+                          AND date_trunc('month', timestamp) <= date_trunc('month', %s::date)
+                        GROUP BY date_trunc('month', timestamp)
+                        ORDER BY month
+                    """, (block_name, start_month, end_month))
+                else:
+                    cursor.execute("""
+                        SELECT month, SUM(energy) as energy FROM (
+                            SELECT 
+                                date_trunc('month', timestamp)::date as month,
+                                block_name,
+                                MAX(total_active_energy) - MIN(total_active_energy) as energy
+                            FROM energy_readings
+                            WHERE date_trunc('month', timestamp) >= date_trunc('month', %s::date)
+                              AND date_trunc('month', timestamp) <= date_trunc('month', %s::date)
+                            GROUP BY date_trunc('month', timestamp), block_name
+                        ) sub
+                        GROUP BY month
+                        ORDER BY month
+                    """, (start_month, end_month))
                 results = cursor.fetchall()
                 logger.info(f"Found {len(results)} monthly records")
                 energy_rate = 0.35  # OMR per kWh
@@ -419,7 +502,7 @@ def get_shift_energy(block_name, date, shift):
 
 def get_machines_comparison(start_date, end_date):
     """Get energy comparison for all machines in date range"""
-    machines = ['M21', 'M22', 'M23', 'M24', 'C2']
+    machines = ['C2', 'M20', 'M21', 'M22', 'M23', 'M24']
     results = []
     total_energy = 0.0
     
@@ -580,7 +663,7 @@ def detect_data_gaps(block_name, start_datetime, end_datetime):
 
 def generate_hourly_summary():
     """Generate hourly energy summary for previous hour"""
-    machines = ['M21', 'M22', 'M23', 'M24', 'C2']
+    machines = ['C2', 'M20', 'M21', 'M22', 'M23', 'M24']
     previous_hour = datetime.now().replace(minute=0, second=0, microsecond=0) - timedelta(hours=1)
     hour_start = previous_hour
     hour_end = previous_hour + timedelta(hours=1)
@@ -626,7 +709,7 @@ def generate_hourly_summary():
 
 def generate_daily_summary():
     """Generate daily energy summary for yesterday"""
-    machines = ['M21', 'M22', 'M23', 'M24', 'C2']
+    machines = ['C2', 'M20', 'M21', 'M22', 'M23', 'M24']
     yesterday = (datetime.now() - timedelta(days=1)).date()
     day_start = datetime.combine(yesterday, datetime.min.time())
     day_end = datetime.combine(yesterday, datetime.max.time())
@@ -671,7 +754,7 @@ def generate_daily_summary():
 
 def generate_monthly_summary():
     """Generate monthly energy summary for previous month"""
-    machines = ['M21', 'M22', 'M23', 'M24', 'C2']
+    machines = ['C2', 'M20', 'M21', 'M22', 'M23', 'M24']
     now = datetime.now()
     # Get first day of previous month
     if now.month == 1:
@@ -918,8 +1001,9 @@ def store_energy_readings_batch():
 @energy_bp.route('/get-energy-history', methods=['GET'])
 @handle_db_errors
 def get_energy_history():
-    """Get energy reading history"""
-    block_name = request.args.get('block_name')
+    """Get energy reading history. block_name is optional (omit or 'All' for all machines)."""
+    raw_block = request.args.get('block_name')
+    block_name = None if (not raw_block or raw_block == 'All') else raw_block
     limit = request.args.get('limit', 100, type=int)
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
@@ -957,75 +1041,74 @@ def get_energy_history():
 @energy_bp.route('/api/energy/historical', methods=['GET'])
 @handle_db_errors
 def get_historical_energy():
-    """Get historical energy data for a time range"""
-    block_name = request.args.get('block_name')
+    """Get historical energy data for a time range. block_name is optional (None = all machines)."""
+    raw_block = request.args.get('block_name')
+    block_name = None if (not raw_block or raw_block == 'All') else raw_block
     start_datetime = request.args.get('start_datetime')
     end_datetime = request.args.get('end_datetime')
     
-    if not block_name or not start_datetime or not end_datetime:
-        return jsonify({'status': 'error', 'message': 'Missing required parameters: block_name, start_datetime, end_datetime'}), 400
+    if not start_datetime or not end_datetime:
+        return jsonify({'status': 'error', 'message': 'Missing required parameters: start_datetime, end_datetime'}), 400
     
     try:
         from app import get_db_connection
-        logger.info(f"Fetching historical energy for {block_name} from {start_datetime} to {end_datetime}")
-        start_reading = get_start_reading(block_name, start_datetime)
-        end_reading = get_end_reading(block_name, end_datetime)
-        
-        if not start_reading:
-            logger.warning(f"No start reading found for {block_name} >= {start_datetime}")
-        if not end_reading:
-            logger.warning(f"No end reading found for {block_name} <= {end_datetime}")
-        
-        if not start_reading or not end_reading:
-            # Fallback: if user asked for today (e.g., starts at 00:00:00) and no start reading >= 00:00:00, 
-            # try to find the last reading BEFORE start_datetime to use as a baseline.
-            # This handles the case where the machine has been running since yesterday but no new reading happened exactly at 00:00:00 or after.
+        label = block_name or 'ALL'
+        logger.info(f"Fetching historical energy for {label} from {start_datetime} to {end_datetime}")
+
+        if block_name:
+            # Single machine: delta between first and last reading
+            start_reading = get_start_reading(block_name, start_datetime)
+            end_reading = get_end_reading(block_name, end_datetime)
+            
             if not start_reading and end_reading:
-                 # Find the reading closest to start_datetime (even if before it)
                 with closing(get_db_connection()) as conn:
                     with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                         cursor.execute("""
+                        cursor.execute("""
                             SELECT * FROM energy_readings
                             WHERE block_name = %s AND timestamp < %s
-                            ORDER BY timestamp DESC
-                            LIMIT 1
+                            ORDER BY timestamp DESC LIMIT 1
                         """, (block_name, start_datetime))
-                         result = cursor.fetchone()
-                         if result:
-                             start_reading = dict(result)
-                             logger.info(f"Using fallback start reading from {start_reading['timestamp']} (before {start_datetime})")
+                        result = cursor.fetchone()
+                        if result:
+                            start_reading = dict(result)
 
-        if not start_reading or not end_reading:
-            error_msg = 'No readings found for the specified time range.'
+            if not start_reading or not end_reading:
+                return jsonify({'status': 'error', 'message': f'No readings found for {block_name} in the specified time range.'}), 404
             
-            # Additional debug info
-            with closing(get_db_connection()) as conn:
-                with conn.cursor() as cursor:
-                    # Check latest reading
-                    cursor.execute("SELECT timestamp FROM energy_readings WHERE block_name = %s ORDER BY timestamp DESC LIMIT 1", (block_name,))
-                    latest = cursor.fetchone()
-                    latest_ts = latest[0] if latest else "None"
-                    
-                    # Check earliest reading
-                    cursor.execute("SELECT timestamp FROM energy_readings WHERE block_name = %s ORDER BY timestamp ASC LIMIT 1", (block_name,))
-                    earliest = cursor.fetchone()
-                    earliest_ts = earliest[0] if earliest else "None"
-                    
-            error_msg += f" (DB Range: {earliest_ts} to {latest_ts})."
-
-            if not start_reading:
-                error_msg += f" No reading found at or after {start_datetime}."
-            if not end_reading:
-                error_msg += f" No reading found at or before {end_datetime}."
-            
-            logger.warning(f"Historical energy 404: {error_msg} (Block: {block_name})")
-            return jsonify({'status': 'error', 'message': error_msg}), 404
-            
-        logger.info(f"Start Reading: {start_reading.get('timestamp')} - {start_reading.get('total_active_energy')}")
-        logger.info(f"End Reading: {end_reading.get('timestamp')} - {end_reading.get('total_active_energy')}")
-        
-        delta = calculate_energy_delta(start_reading, end_reading)
-        logger.info(f"Calculated Delta: {delta}")
+            delta = calculate_energy_delta(start_reading, end_reading)
+        else:
+            # All machines: sum deltas per machine to avoid cross-machine counter math
+            all_machines = ['C2', 'M20', 'M21', 'M22', 'M23', 'M24']
+            total_active = 0.0
+            total_reactive = 0.0
+            total_apparent = 0.0
+            for m in all_machines:
+                sr = get_start_reading(m, start_datetime)
+                er = get_end_reading(m, end_datetime)
+                if not sr and er:
+                    with closing(get_db_connection()) as conn:
+                        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                            cursor.execute("""
+                                SELECT * FROM energy_readings
+                                WHERE block_name = %s AND timestamp < %s
+                                ORDER BY timestamp DESC LIMIT 1
+                            """, (m, start_datetime))
+                            result = cursor.fetchone()
+                            if result:
+                                sr = dict(result)
+                if sr and er:
+                    try:
+                        d = calculate_energy_delta(sr, er)
+                        total_active += d['active_energy']
+                        total_reactive += d['reactive_energy']
+                        total_apparent += d['apparent_energy']
+                    except ValueError:
+                        pass
+            delta = {
+                'active_energy': round(total_active, 3),
+                'reactive_energy': round(total_reactive, 3),
+                'apparent_energy': round(total_apparent, 3)
+            }
         
         avg_voltage = calculate_avg_voltage(block_name, start_datetime, end_datetime)
         avg_power = calculate_avg_power(block_name, start_datetime, end_datetime)
@@ -1033,7 +1116,7 @@ def get_historical_energy():
         return jsonify({
             'status': 'success',
             'data': {
-                'block_name': block_name,
+                'block_name': block_name or 'All',
                 'start_time': start_datetime,
                 'end_time': end_datetime,
                 'active_energy': delta['active_energy'],
@@ -1053,33 +1136,40 @@ def get_historical_energy():
 @energy_bp.route('/api/energy/peak-demand', methods=['GET'])
 @handle_db_errors
 def get_peak_demand():
-    """Get peak demand (MAX effective_power) for a date range"""
-    block_name = request.args.get('block_name')
+    """Get peak demand (MAX effective_power) for a date range. block_name is optional."""
+    raw_block = request.args.get('block_name')
+    block_name = None if (not raw_block or raw_block == 'All') else raw_block
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
     
-    if not block_name or not start_date or not end_date:
-        return jsonify({'status': 'error', 'message': 'Missing required parameters: block_name, start_date, end_date'}), 400
+    if not start_date or not end_date:
+        return jsonify({'status': 'error', 'message': 'Missing required parameters: start_date, end_date'}), 400
     
     try:
         from app import get_db_connection
-        logger.info(f"Fetching peak demand for {block_name} from {start_date} to {end_date}")
+        label = block_name or 'ALL'
+        logger.info(f"Fetching peak demand for {label} from {start_date} to {end_date}")
         
-        query = """
-            SELECT MAX(effective_power) as peak_demand
-            FROM energy_readings 
-            WHERE block_name = %s 
-            AND timestamp >= %s 
-            AND timestamp <= %s
-        """
+        if block_name:
+            query = """
+                SELECT MAX(effective_power) as peak_demand
+                FROM energy_readings 
+                WHERE block_name = %s AND timestamp >= %s AND timestamp <= %s
+            """
+            params = (block_name, start_date, end_date)
+        else:
+            query = """
+                SELECT MAX(effective_power) as peak_demand
+                FROM energy_readings 
+                WHERE timestamp >= %s AND timestamp <= %s
+            """
+            params = (start_date, end_date)
         
         with closing(get_db_connection()) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute(query, (block_name, start_date, end_date))
+                cursor.execute(query, params)
                 result = cursor.fetchone()
                 peak_demand = result['peak_demand'] if result and result['peak_demand'] is not None else 0
-        
-        logger.info(f"Peak demand for {block_name}: {peak_demand} kW")
         
         return jsonify({
             'status': 'success',
@@ -1094,15 +1184,24 @@ def get_peak_demand():
 @energy_bp.route('/api/energy/hourly', methods=['GET'])
 @handle_db_errors
 def get_hourly_energy():
-    """Get hourly energy breakdown for a specific date"""
-    block_name = request.args.get('block_name')
-    date = request.args.get('date')
+    """Get hourly energy breakdown for a datetime range. block_name is optional."""
+    raw_block = request.args.get('block_name')
+    block_name = None if (not raw_block or raw_block == 'All') else raw_block
+    start_datetime = request.args.get('start_datetime')
+    end_datetime = request.args.get('end_datetime')
     
-    if not block_name or not date:
-        return jsonify({'status': 'error', 'message': 'Missing required parameters: block_name, date'}), 400
+    # Backward compat: accept 'date' param and expand to full day range
+    if not start_datetime and not end_datetime:
+        date = request.args.get('date')
+        if date:
+            start_datetime = f"{date} 00:00:00"
+            end_datetime = f"{date} 23:59:59"
+    
+    if not start_datetime or not end_datetime:
+        return jsonify({'status': 'error', 'message': 'Missing required parameters: start_datetime, end_datetime (or date)'}), 400
     
     try:
-        data = get_hourly_energy_data(block_name, date)
+        data = get_hourly_energy_data(block_name, start_datetime, end_datetime)
         return jsonify({
             'status': 'success',
             'data': data
@@ -1114,13 +1213,14 @@ def get_hourly_energy():
 @energy_bp.route('/api/energy/daily', methods=['GET'])
 @handle_db_errors
 def get_daily_energy():
-    """Get daily energy summary for date range"""
-    block_name = request.args.get('block_name')
+    """Get daily energy summary for date range. block_name is optional."""
+    raw_block = request.args.get('block_name')
+    block_name = None if (not raw_block or raw_block == 'All') else raw_block
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
     
-    if not block_name or not start_date or not end_date:
-        return jsonify({'status': 'error', 'message': 'Missing required parameters: block_name, start_date, end_date'}), 400
+    if not start_date or not end_date:
+        return jsonify({'status': 'error', 'message': 'Missing required parameters: start_date, end_date'}), 400
     
     try:
         data = get_daily_energy_data(block_name, start_date, end_date)
@@ -1135,13 +1235,14 @@ def get_daily_energy():
 @energy_bp.route('/api/energy/monthly', methods=['GET'])
 @handle_db_errors
 def get_monthly_energy():
-    """Get monthly energy summary for month range"""
-    block_name = request.args.get('block_name')
+    """Get monthly energy summary for month range. block_name is optional."""
+    raw_block = request.args.get('block_name')
+    block_name = None if (not raw_block or raw_block == 'All') else raw_block
     start_month = request.args.get('start_month')
     end_month = request.args.get('end_month')
     
-    if not block_name or not start_month or not end_month:
-        return jsonify({'status': 'error', 'message': 'Missing required parameters: block_name, start_month, end_month'}), 400
+    if not start_month or not end_month:
+        return jsonify({'status': 'error', 'message': 'Missing required parameters: start_month, end_month'}), 400
     
     try:
         data = get_monthly_energy_data(block_name, start_month, end_month)
@@ -1267,80 +1368,63 @@ def generate_report():
 @energy_bp.route('/api/energy/today', methods=['GET'])
 @handle_db_errors
 def get_today_energy():
-    """Get today's energy consumption: Last Active Energy reading today - First Active Energy reading today"""
-    block_name = request.args.get('block_name')
-    
-    if not block_name:
-        return jsonify({'status': 'error', 'message': 'Missing required parameter: block_name'}), 400
+    """Get today's energy consumption. block_name is optional (None/'All' = sum across all machines)."""
+    raw_block = request.args.get('block_name')
+    block_name = None if (not raw_block or raw_block == 'All') else raw_block
     
     try:
         from app import get_db_connection
         from datetime import datetime, date
         
-        # Get today's date range (start of day to end of day)
         today = date.today()
         start_datetime = datetime.combine(today, datetime.min.time()).strftime('%Y-%m-%d %H:%M:%S')
         end_datetime = datetime.combine(today, datetime.max.time()).strftime('%Y-%m-%d %H:%M:%S')
         
-        logger.info(f"Fetching today's energy for {block_name} from {start_datetime} to {end_datetime}")
+        label = block_name or 'ALL'
+        logger.info(f"Fetching today's energy for {label} from {start_datetime} to {end_datetime}")
         
-        # Get first reading today (at or after start of day)
-        first_reading = get_start_reading(block_name, start_datetime)
+        machines_to_check = [block_name] if block_name else ['C2', 'M20', 'M21', 'M22', 'M23', 'M24']
+        total_today_energy = 0.0
+        first_ts = None
+        last_ts = None
         
-        # Get last reading today (at or before end of day)
-        last_reading = get_end_reading(block_name, end_datetime)
-        
-        # If no readings found for today, try to get the last reading before today as baseline
-        if not first_reading and last_reading:
-            # Find the reading closest to start_datetime (even if before it)
-            with closing(get_db_connection()) as conn:
-                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    cursor.execute("""
-                        SELECT * FROM energy_readings
-                        WHERE block_name = %s AND timestamp < %s
-                        ORDER BY timestamp DESC
-                        LIMIT 1
-                    """, (block_name, start_datetime))
-                    result = cursor.fetchone()
-                    if result:
-                        first_reading = dict(result)
-                        logger.info(f"Using fallback first reading from {first_reading['timestamp']} (before {start_datetime})")
-        
-        if not first_reading or not last_reading:
-            error_msg = f"No readings found for {block_name} today."
-            logger.warning(f"Today's energy 404: {error_msg}")
-            return jsonify({
-                'status': 'error', 
-                'message': error_msg,
-                'data': {
-                    'today_energy': 0,
-                    'first_reading_time': None,
-                    'last_reading_time': None
-                }
-            }), 404
-        
-        # Calculate today's energy consumption
-        first_active_energy = float(first_reading.get('total_active_energy', 0))
-        last_active_energy = float(last_reading.get('total_active_energy', 0))
-        today_energy = last_active_energy - first_active_energy
-        
-        # Handle negative values (counter reset scenario)
-        if today_energy < 0:
-            logger.warning(f"Negative energy detected for {block_name} today. This might indicate a counter reset.")
-            # Return as is (let frontend handle it, or could set to 0)
-            pass
-        
-        logger.info(f"Today's energy for {block_name}: {today_energy} kWh (First: {first_active_energy}, Last: {last_active_energy})")
+        for m in machines_to_check:
+            first_reading = get_start_reading(m, start_datetime)
+            last_reading = get_end_reading(m, end_datetime)
+            
+            if not first_reading and last_reading:
+                with closing(get_db_connection()) as conn:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                        cursor.execute("""
+                            SELECT * FROM energy_readings
+                            WHERE block_name = %s AND timestamp < %s
+                            ORDER BY timestamp DESC LIMIT 1
+                        """, (m, start_datetime))
+                        result = cursor.fetchone()
+                        if result:
+                            first_reading = dict(result)
+            
+            if first_reading and last_reading:
+                first_ae = float(first_reading.get('total_active_energy', 0))
+                last_ae = float(last_reading.get('total_active_energy', 0))
+                delta = last_ae - first_ae
+                if delta >= 0:
+                    total_today_energy += delta
+                
+                fr_ts = first_reading.get('timestamp')
+                lr_ts = last_reading.get('timestamp')
+                if fr_ts and (first_ts is None or fr_ts < first_ts):
+                    first_ts = fr_ts
+                if lr_ts and (last_ts is None or lr_ts > last_ts):
+                    last_ts = lr_ts
         
         return jsonify({
             'status': 'success',
             'data': {
-                'block_name': block_name,
-                'today_energy': round(today_energy, 3),
-                'first_reading_time': first_reading.get('timestamp').isoformat() if first_reading.get('timestamp') else None,
-                'last_reading_time': last_reading.get('timestamp').isoformat() if last_reading.get('timestamp') else None,
-                'first_active_energy': round(first_active_energy, 3),
-                'last_active_energy': round(last_active_energy, 3)
+                'block_name': block_name or 'All',
+                'today_energy': round(total_today_energy, 3),
+                'first_reading_time': first_ts.isoformat() if hasattr(first_ts, 'isoformat') else first_ts,
+                'last_reading_time': last_ts.isoformat() if hasattr(last_ts, 'isoformat') else last_ts,
             }
         }), 200
         

@@ -99,6 +99,8 @@ def export_mila_data(output_file, limit=100, db_host='127.0.0.1'):
                         'Status': row.get('status'),
                         'Produced Weight (kg)': row.get('produced_weight'),
                         'Created At': row.get('created_at'),
+                        'Order Start Time': row.get('order_start_time'),
+                        'Order End Time': row.get('order_end_time'),
                     }
                     
                     # Flatten receiver (JSONB array)
@@ -143,7 +145,7 @@ def export_mila_data(output_file, limit=100, db_host='127.0.0.1'):
                 df = pd.DataFrame(export_data)
                 
                 # Reorder columns to put important ones first
-                base_columns = ['ID', 'Created At', 'Order Name', 'Status', 'Produced Weight (kg)']
+                base_columns = ['ID', 'Created At', 'Order Name', 'Status', 'Order Start Time', 'Order End Time', 'Produced Weight (kg)']
                 
                 # Get all other columns
                 other_columns = [col for col in df.columns if col not in base_columns]

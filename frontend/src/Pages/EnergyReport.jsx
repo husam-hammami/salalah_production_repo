@@ -8,7 +8,7 @@ import MultiLineChart from "../Components/charts/MultiLineChart";
 import GroupedBarChart from "../Components/charts/GroupedBarChart";
 import axios from 'axios';
 
-const MACHINES = ["C2", "M20", "M21", "M22", "M23", "M24"];
+const MACHINES = ["All", "C2", "M20", "M21", "M22", "M23", "M24"];
 const SHIFTS = ["All Shifts", "Shift A (06:00-14:00)", "Shift B (14:00-22:00)", "Shift C (22:00-06:00)"];
 
 const StatCard = ({ title, value, unit, icon, color }) => {
@@ -40,7 +40,7 @@ const StatCard = ({ title, value, unit, icon, color }) => {
 const EnergyReport = () => {
   useLenisScroll();
 
-  const [selectedMachine, setSelectedMachine] = useState("M24");
+  const [selectedMachine, setSelectedMachine] = useState("All");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [selectedShift, setSelectedShift] = useState("All Shifts");
@@ -81,7 +81,33 @@ const EnergyReport = () => {
     setEndDate(toLocalISO(end));
   }, []);
 
-  // Fetch Data
+  // Compute effective date range (applies shift override when a specific shift is selected)
+  const getEffectiveDateRange = () => {
+    if (!startDate || !endDate) return { start: '', end: '' };
+
+    let effectiveStart = startDate.replace('T', ' ') + ':00';
+    let effectiveEnd = endDate.replace('T', ' ') + ':59';
+
+    if (selectedShift !== 'All Shifts') {
+      const dateStr = startDate.split('T')[0];
+      if (selectedShift.includes('Shift A')) {
+        effectiveStart = `${dateStr} 06:00:00`;
+        effectiveEnd = `${dateStr} 13:59:59`;
+      } else if (selectedShift.includes('Shift B')) {
+        effectiveStart = `${dateStr} 14:00:00`;
+        effectiveEnd = `${dateStr} 21:59:59`;
+      } else if (selectedShift.includes('Shift C')) {
+        effectiveStart = `${dateStr} 22:00:00`;
+        const nextDay = new Date(dateStr);
+        nextDay.setDate(nextDay.getDate() + 1);
+        const nextStr = nextDay.toISOString().split('T')[0];
+        effectiveEnd = `${nextStr} 05:59:59`;
+      }
+    }
+    return { start: effectiveStart, end: effectiveEnd };
+  };
+
+  // Fetch all data in parallel
   useEffect(() => {
     if (!startDate || !endDate) return;
 
@@ -89,110 +115,82 @@ const EnergyReport = () => {
       setLoading(true);
       setError(null);
       try {
-        // 1. Fetch KPI Data (Historical Summary)
-        const historyParams = {
-          block_name: selectedMachine,
-          start_datetime: startDate.replace('T', ' ') + ':00',
-          end_datetime: endDate.replace('T', ' ') + ':59'
-        };
-        
-        // Also handling Shift logic if needed, but for now using date range
-        // If specific shift selected, we might want to adjust start/end times or call shift endpoint
-        
-        const kpiResponse = await axios.get('/api/energy/historical', { params: historyParams });
-        if (kpiResponse.data.status === 'success') {
-            setHistoricalData(kpiResponse.data.data);
-        }
+        const { start: effStart, end: effEnd } = getEffectiveDateRange();
+        const machineParam = selectedMachine; // 'All' is handled by backend
 
-        // 1.5. Fetch Today's Energy Consumption (if viewing today's date)
         const today = new Date();
         const selectedDate = new Date(startDate);
         const isToday = selectedDate.toDateString() === today.toDateString();
-        
-        if (isToday) {
-          try {
-            const todayResponse = await axios.get('/api/energy/today', {
-              params: { block_name: selectedMachine }
-            });
-            if (todayResponse.data.status === 'success') {
-              setTodayEnergy(todayResponse.data.data.today_energy || 0);
-            } else {
-              setTodayEnergy(0);
-            }
-          } catch (err) {
-            console.error("Error fetching today's energy:", err);
-            setTodayEnergy(0);
-          }
+
+        // Fire all requests in parallel
+        const [kpiRes, todayRes, hourlyRes, monthlyRes, dailyRes, trendRes, peakRes] = await Promise.allSettled([
+          axios.get('/api/energy/historical', {
+            params: { block_name: machineParam, start_datetime: effStart, end_datetime: effEnd }
+          }),
+          isToday
+            ? axios.get('/api/energy/today', { params: { block_name: machineParam } })
+            : Promise.resolve(null),
+          axios.get('/api/energy/hourly', {
+            params: { block_name: machineParam, start_datetime: effStart, end_datetime: effEnd }
+          }),
+          axios.get('/api/energy/monthly', {
+            params: { block_name: machineParam, start_month: startDate.split('T')[0], end_month: endDate.split('T')[0] }
+          }),
+          axios.get('/api/energy/daily', {
+            params: { block_name: machineParam, start_date: startDate.split('T')[0], end_date: endDate.split('T')[0] }
+          }),
+          axios.get('/get-energy-history', {
+            params: { block_name: machineParam, start_date: effStart, end_date: effEnd, limit: 200 }
+          }),
+          axios.get('/api/energy/peak-demand', {
+            params: { block_name: machineParam, start_date: effStart, end_date: effEnd }
+          }),
+        ]);
+
+        // Process KPI
+        if (kpiRes.status === 'fulfilled' && kpiRes.value?.data?.status === 'success') {
+          setHistoricalData(kpiRes.value.data.data);
+        }
+
+        // Process Today's energy
+        if (isToday && todayRes.status === 'fulfilled' && todayRes.value?.data?.status === 'success') {
+          setTodayEnergy(todayRes.value.data.data.today_energy || 0);
         } else {
-          // If not today, set to 0
           setTodayEnergy(0);
         }
 
-        // 2. Fetch Hourly Data (For Chart and Table)
-        // API requires 'date' (YYYY-MM-DD), so we take the start date
-        const dateStr = startDate.split('T')[0];
-        const hourlyResponse = await axios.get('/api/energy/hourly', { 
-            params: { block_name: selectedMachine, date: dateStr } 
-        });
-        if (hourlyResponse.data.status === 'success') {
-            setHourlyData(hourlyResponse.data.data);
+        // Process Hourly
+        if (hourlyRes.status === 'fulfilled' && hourlyRes.value?.data?.status === 'success') {
+          setHourlyData(hourlyRes.value.data.data);
         }
 
-        // 3. Fetch Monthly Data (For Chart and Table)
-        // Using start and end date to determine month range
-        const startMonth = startDate.split('T')[0];
-        const endMonth = endDate.split('T')[0];
-        const monthlyResponse = await axios.get('/api/energy/monthly', {
-            params: { block_name: selectedMachine, start_month: startMonth, end_month: endMonth }
-        });
-        if (monthlyResponse.data.status === 'success') {
-            setMonthlyData(monthlyResponse.data.data);
+        // Process Monthly
+        if (monthlyRes.status === 'fulfilled' && monthlyRes.value?.data?.status === 'success') {
+          setMonthlyData(monthlyRes.value.data.data);
         }
 
-        // 4. Fetch Daily Data (For Table)
-        const dailyResponse = await axios.get('/api/energy/daily', {
-            params: { block_name: selectedMachine, start_date: startDate.split('T')[0], end_date: endDate.split('T')[0] }
-        });
-        if (dailyResponse.data.status === 'success') {
-            setDailyData(dailyResponse.data.data);
+        // Process Daily
+        if (dailyRes.status === 'fulfilled' && dailyRes.value?.data?.status === 'success') {
+          setDailyData(dailyRes.value.data.data);
         }
 
-        // 5. Fetch Power Trend Data (Raw history for line chart)
-        // Using get-energy-history endpoint which returns raw readings
-        const trendResponse = await axios.get('/get-energy-history', {
-            params: { 
-                block_name: selectedMachine, 
-                start_date: startDate.replace('T', ' ') + ':00',
-                end_date: endDate.replace('T', ' ') + ':59',
-                limit: 100 // Limit points for chart performance
-            }
-        });
-        
-        if (trendResponse.data.status === 'success') {
-            // Process raw data for chart: reverse to chronological order
-            const trendData = trendResponse.data.data.reverse().map(item => ({
-                time: new Date(item.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
-                power: item.effective_power
-            }));
-            setPowerTrend(trendData);
+        // Process Power Trend
+        if (trendRes.status === 'fulfilled' && trendRes.value?.data?.status === 'success') {
+          const trendData = trendRes.value.data.data.reverse().map(item => ({
+            time: new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+            power: item.effective_power
+          }));
+          setPowerTrend(trendData);
         }
 
-        // 6. Fetch Peak Demand
-        const peakResponse = await axios.get('/api/energy/peak-demand', {
-            params: {
-                block_name: selectedMachine,
-                start_date: startDate.replace('T', ' ') + ':00',
-                end_date: endDate.replace('T', ' ') + ':59'
-            }
-        });
-        if (peakResponse.data.status === 'success') {
-            setPeakDemand(peakResponse.data.data.peak_demand || 0);
+        // Process Peak Demand
+        if (peakRes.status === 'fulfilled' && peakRes.value?.data?.status === 'success') {
+          setPeakDemand(peakRes.value.data.data.peak_demand || 0);
         }
 
       } catch (err) {
         console.error("Error fetching energy data:", err);
         setError("Failed to fetch data. Please check connection.");
-        // Fallback or empty state is handled by initial state
       } finally {
         setLoading(false);
       }
@@ -378,7 +376,7 @@ const EnergyReport = () => {
         <div className="mb-8 text-center">
           <h1 className="text-2xl font-bold text-gray-800">Historical Energy Report</h1>
           <p className="text-gray-600 mt-1">
-            Machine: <span className="font-semibold text-blue-600">{selectedMachine}</span> | 
+            Machine: <span className="font-semibold text-blue-600">{selectedMachine === 'All' ? 'All Machines' : selectedMachine}</span> | 
             Period: <span className="font-semibold">{new Date(startDate).toLocaleString()}</span> to <span className="font-semibold">{new Date(endDate).toLocaleString()}</span>
           </p>
           {loading && <p className="text-blue-500 text-sm mt-2">Loading data...</p>}

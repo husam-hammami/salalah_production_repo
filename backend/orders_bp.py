@@ -2997,12 +2997,13 @@ def get_all_mila_archive():
                     """, (limit,))
                     rows = cur.fetchall()
                     rows = list(reversed(rows))  # ASC for UI
-                # Serialize created_at to ISO string for frontend (Job_logs table dates)
+                # Serialize datetime columns to ISO string for frontend
                 out = []
                 for r in rows:
                     row = dict(r)
-                    if row.get('created_at') is not None and hasattr(row['created_at'], 'isoformat'):
-                        row['created_at'] = row['created_at'].isoformat()
+                    for dt_col in ('created_at', 'order_start_time', 'order_end_time'):
+                        if row.get(dt_col) is not None and hasattr(row[dt_col], 'isoformat'):
+                            row[dt_col] = row[dt_col].isoformat()
                     out.append(row)
                 return jsonify({"status": "success", "data": out}), 200
     except Exception as e:

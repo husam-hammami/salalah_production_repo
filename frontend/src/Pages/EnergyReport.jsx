@@ -5,6 +5,7 @@ import asmLogo from "../Assets/Asm_Logo.png";
 import salalahLogo from "../Assets/salalah_logo.png";
 import { FaBolt, FaChargingStation, FaPlug, FaBatteryThreeQuarters } from "react-icons/fa";
 import MultiLineChart from "../Components/charts/MultiLineChart";
+import GroupedBarChart from "../Components/charts/GroupedBarChart";
 import axios from 'axios';
 
 const MACHINES = ["All", "C2", "M20", "M21", "M22", "M23", "M24"];
@@ -210,29 +211,34 @@ const EnergyReport = () => {
   }, [selectedMachine, startDate, endDate, selectedShift]);
 
 
-  // Chart Data Preparation — dual-line (Energy + Voltage) for hourly & monthly
+  // Chart Data Preparation — bar (Energy) + line overlay (Voltage) for hourly
   const hourlyChartData = {
     labels: hourlyData.map(d =>
       new Date(d.hour).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     ),
     datasets: [
       {
+        type: 'bar',
         label: 'Energy (kWh)',
         data: hourlyData.map(d => d.energy),
+        backgroundColor: 'rgba(59, 130, 246, 0.7)',
         borderColor: 'rgb(59, 130, 246)',
-        backgroundColor: 'rgba(59, 130, 246, 0.1)',
-        tension: 0.4,
-        fill: false,
+        borderWidth: 1,
         yAxisID: 'y',
+        order: 2,
       },
       {
+        type: 'line',
         label: 'Avg Voltage (V)',
         data: hourlyData.map(d => d.avg_voltage),
         borderColor: 'rgb(245, 158, 11)',
         backgroundColor: 'rgba(245, 158, 11, 0.1)',
         tension: 0.4,
         fill: false,
+        pointRadius: 3,
+        borderWidth: 2,
         yAxisID: 'y1',
+        order: 1,
       }
     ]
   };
@@ -476,9 +482,9 @@ const EnergyReport = () => {
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
               {/* Hourly Energy & Voltage Chart */}
               <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 shadow-sm w-full">
-                <h3 className="text-lg font-semibold text-gray-700 mb-4">Hourly Energy & Voltage Trend</h3>
+                <h3 className="text-lg font-semibold text-gray-700 mb-4">Hourly Energy & Voltage</h3>
                 <div className="h-80 w-full">
-                  <MultiLineChart data={hourlyChartData} title="Energy vs Voltage (Hourly)" dualAxis />
+                  <GroupedBarChart data={hourlyChartData} title="Energy vs Voltage (Hourly)" dualAxis />
                 </div>
               </div>
 

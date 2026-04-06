@@ -28,6 +28,36 @@ MIGRATIONS = [
             "ALTER TABLE mila_monitor_logs_archive ADD COLUMN IF NOT EXISTS order_end_time TIMESTAMP",
         ],
     },
+    {
+        "id": "002_fcl_order_times",
+        "description": "Add order_start_time and order_end_time to FCL tables",
+        "statements": [
+            "ALTER TABLE fcl_monitor_logs ADD COLUMN IF NOT EXISTS order_start_time TIMESTAMP",
+            "ALTER TABLE fcl_monitor_logs ADD COLUMN IF NOT EXISTS order_end_time TIMESTAMP",
+            "ALTER TABLE fcl_monitor_logs_archive ADD COLUMN IF NOT EXISTS order_start_time TIMESTAMP",
+            "ALTER TABLE fcl_monitor_logs_archive ADD COLUMN IF NOT EXISTS order_end_time TIMESTAMP",
+        ],
+    },
+    {
+        "id": "003_scl_order_times",
+        "description": "Add order_start_time and order_end_time to SCL tables",
+        "statements": [
+            "ALTER TABLE scl_monitor_logs ADD COLUMN IF NOT EXISTS order_start_time TIMESTAMP",
+            "ALTER TABLE scl_monitor_logs ADD COLUMN IF NOT EXISTS order_end_time TIMESTAMP",
+            "ALTER TABLE scl_monitor_logs_archive ADD COLUMN IF NOT EXISTS order_start_time TIMESTAMP",
+            "ALTER TABLE scl_monitor_logs_archive ADD COLUMN IF NOT EXISTS order_end_time TIMESTAMP",
+        ],
+    },
+    {
+        "id": "004_ftra_order_times",
+        "description": "Add order_start_time and order_end_time to FTRA tables",
+        "statements": [
+            "ALTER TABLE ftra_monitor_logs ADD COLUMN IF NOT EXISTS order_start_time TIMESTAMP",
+            "ALTER TABLE ftra_monitor_logs ADD COLUMN IF NOT EXISTS order_end_time TIMESTAMP",
+            "ALTER TABLE ftra_monitor_logs_archive ADD COLUMN IF NOT EXISTS order_start_time TIMESTAMP",
+            "ALTER TABLE ftra_monitor_logs_archive ADD COLUMN IF NOT EXISTS order_end_time TIMESTAMP",
+        ],
+    },
 ]
 
 

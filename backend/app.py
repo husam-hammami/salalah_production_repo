@@ -1244,102 +1244,13 @@ def archive_old_logs():
                         gevent.sleep(wait_seconds)
                         continue
 
-                    # 2. Build CUMULATIVE per-bin weights (convert t/h → kg for each record)
-                    # ✅ Calculate divisor dynamically based on actual record count and time span
-                    first_time = min(r.get('created_at') for r in rows if r.get('created_at'))
-                    last_time = max(r.get('created_at') for r in rows if r.get('created_at'))
-                    time_span_seconds = (last_time - first_time).total_seconds()
-                    
-                    # Calculate actual divisor: how many records per hour?
-                    # divisor = (number of records / time span in hours) = records per hour
-                    if time_span_seconds > 0:
-                        time_span_hours = time_span_seconds / 3600
-                        actual_divisor = len(rows) / time_span_hours
-                    else:
-                        actual_divisor = 1200  # Fallback to 3-second assumption
-                    
-                    logger.info(f"📊 [FCL Archive] Time span: {time_span_seconds:.0f}s | Records: {len(rows)} | Divisor: {actual_divisor:.0f} (records/hour)")
-                    
-                    bin_cumulative = defaultdict(float)
-                    receiver_cumulative_kg = 0.0
-                    water_cumulative_liters = 0.0  # ✅ Sum water rate (l/h) over hour → total liters (same method as receiver)
-
-                    for row in rows:
-                        sources = row.get('active_sources', [])
-                        if isinstance(sources, str):
-                            sources = json.loads(sources)
-                        
-                        # ✅ Convert each sender's flow rate (t/h) to kg per record using ACTUAL divisor
-                        for src in sources:
-                            bin_id = src.get('bin_id')
-                            weight_tph = float(src.get('weight', 0))  # t/h
-                            kg_per_record = weight_tph * 1000 / actual_divisor  # ✅ Dynamic divisor!
-                            bin_cumulative[bin_id] += kg_per_record  # Accumulate kg
-                        
-                        # ✅ Convert receiver flow rate (t/h) to kg per record using ACTUAL divisor
-                        receiver_tph = float(row.get('receiver', 0) or 0)  # t/h (flow rate only, not cumulative)
-                        receiver_kg_per_record = receiver_tph * 1000 / actual_divisor  # ✅ Dynamic divisor!
-                        receiver_cumulative_kg += receiver_kg_per_record
-
-                        # ✅ Convert water flow rate (l/h) to liters per record; sum → total liters for the hour
-                        water_lh = float(row.get('water_consumed', 0) or 0)  # l/h (stored as rate in live table)
-                        liters_per_record = water_lh / actual_divisor  # same method as receiver
-                        water_cumulative_liters += liters_per_record
-
-                    # Store cumulative kg for each bin
-                    per_bin_json = json.dumps([
-                        {"bin_id": k, "total_weight": round(v, 3)}  # kg
-                        for k, v in bin_cumulative.items()
-                    ])
-                    
-                    # Total produced = sum of all sender bins (kg) + receiver flow (kg)
-                    total_bin_weight_kg = sum(bin_cumulative.values())
-                    produced_weight = round(total_bin_weight_kg + receiver_cumulative_kg, 3)
-                    
-                    # ✅ Find latest record by timestamp (most reliable method)
-                    latest = max(rows, key=lambda r: r.get('created_at') or datetime.datetime.min)
-
-                    # ✅ Archive order_name: use last non-null order_name in the hour (by created_at), not just latest
-                    # so the hour gets the order that was running even if the last second was idle (job_status=0)
-                    rows_sorted = sorted(rows, key=lambda r: r.get('created_at') or datetime.datetime.min)
-                    rows_with_order = [r for r in rows_sorted if r.get('order_name') and str(r.get('order_name')).strip()]
-                    archive_order_name = rows_with_order[-1]['order_name'] if rows_with_order else latest.get('order_name')
-
-                    # ✅ Extract FCL_2_520WE directly from the LATEST record (most recent timestamp)
-                    # This is more reliable than relying on loop order
-                    fcl_2_520we_last = 0
-                    latest_fcl_receivers = latest.get('fcl_receivers', [])
-                    if isinstance(latest_fcl_receivers, str):
-                        latest_fcl_receivers = json.loads(latest_fcl_receivers)
-                    
-                    # ✅ Get FCL_2_520WE value from the latest record (most recent timestamp)
-                    for rec in latest_fcl_receivers:
-                        if rec.get('id') == 'FCL_2_520WE':
-                            fcl_2_520we_last = float(rec.get('weight', 0))  # Already in kg
-                            break  # Found it, no need to continue
-                    
-                    # ✅ Fallback: If not found in latest record, scan all records and take maximum
-                    # This handles edge cases where latest record might not have FCL_2_520WE
-                    if fcl_2_520we_last == 0:
-                        for row in rows:
-                            fcl_receivers = row.get('fcl_receivers', [])
-                            if isinstance(fcl_receivers, str):
-                                fcl_receivers = json.loads(fcl_receivers)
-                            for rec in fcl_receivers:
-                                if rec.get('id') == 'FCL_2_520WE':
-                                    weight = float(rec.get('weight', 0))
-                                    if weight > fcl_2_520we_last:  # Take the maximum (should be latest)
-                                        fcl_2_520we_last = weight
-                    
-                    logger.info(f"📦 [FCL Archive] Records: {len(rows)} | Senders: {total_bin_weight_kg:.1f} kg | Receiver: {receiver_cumulative_kg:.1f} kg | Water: {water_cumulative_liters:.1f} L | Total: {produced_weight:.1f} kg | FCL_2_520WE (last value): {fcl_2_520we_last:.0f} kg")
-
                     # ✅ Use Dubai timezone for archive timestamp
                     import pytz
                     from datetime import datetime as dt
                     dubai_tz = pytz.timezone('Asia/Dubai')
                     archive_time = dt.now(pytz.utc).astimezone(dubai_tz).replace(tzinfo=None)
 
-                    # 3. Insert archive summary
+                    # Ensure archive table exists
                     cur.execute("""
                         CREATE TABLE IF NOT EXISTS fcl_monitor_logs_archive (
                             id SERIAL PRIMARY KEY,
@@ -1356,54 +1267,134 @@ def archive_old_logs():
                             active_destination JSONB,
                             order_name TEXT,
                             per_bin_weights JSONB,
-                            created_at TIMESTAMP
+                            created_at TIMESTAMP,
+                            order_start_time TIMESTAMP,
+                            order_end_time TIMESTAMP
                         );
                     """)
-                    # ✅ FCL_2_520WE: Store LAST value (not summed!)
-                    # This is a cumulative counter from PLC (already in kg)
-                    # We just store the final reading from the last record of the hour
-                    
-                    # Update FCL_2_520WE to the LAST cumulative value (not summed over the hour!)
-                    for rec in latest_fcl_receivers:
-                        if rec.get('id') == 'FCL_2_520WE':
-                            rec['weight'] = fcl_2_520we_last  # Just the last value, already in kg
-                    
-                    cur.execute("""
-                        INSERT INTO fcl_monitor_logs_archive (
-                            job_status, line_running, receiver, fcl_receivers, flow_rate, produced_weight,
-                            water_consumed, moisture_offset, moisture_setpoint, cleaning_scale_bypass,
-                            active_sources, active_destination, order_name,
-                            per_bin_weights, created_at
-                        )
-                        VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s,
-                                %s::jsonb, %s::jsonb, %s,
-                                %s::jsonb, %s)
-                    """, (
-                        latest['job_status'],
-                        latest['line_running'],
-                        round(receiver_cumulative_kg, 3),  # ✅ Cumulative kg, not summed t/h
-                        json.dumps(latest_fcl_receivers),  # ✅ Include updated FCL_2_520WE counter
-                        latest['flow_rate'],
-                        produced_weight,  # ✅ Total cumulative kg (senders + receiver)
-                        round(water_cumulative_liters, 3),  # ✅ Total liters for the hour (sum of rate l/h over hour, same method as receiver)
-                        latest['moisture_offset'],
-                        latest['moisture_setpoint'],
-                        latest.get('cleaning_scale_bypass', False), # ✅ New field
-                        json.dumps(latest['active_sources']),
-                        json.dumps(latest['active_destination']),
-                        archive_order_name,  # ✅ Last non-null order_name in hour (not just latest row)
-                        per_bin_json,  # ✅ Per-bin cumulative kg
-                        archive_time  # ✅ Explicit Dubai timezone timestamp
-                    ))
 
-                    # 4. Now safely delete the logs that were archived
+                    # Group rows by order_name so each order gets its own archive row
+                    from collections import OrderedDict
+                    order_groups = OrderedDict()
+                    for r in rows:
+                        oname = r.get('order_name') or '__idle__'
+                        order_groups.setdefault(oname, []).append(r)
+
+                    for group_order_name, group_rows in order_groups.items():
+                        actual_order_name = None if group_order_name == '__idle__' else group_order_name
+
+                        # Calculate divisor dynamically per group
+                        first_time = min(r.get('created_at') for r in group_rows if r.get('created_at'))
+                        last_time = max(r.get('created_at') for r in group_rows if r.get('created_at'))
+                        time_span_seconds = (last_time - first_time).total_seconds()
+                        if time_span_seconds > 0:
+                            time_span_hours = time_span_seconds / 3600
+                            actual_divisor = len(group_rows) / time_span_hours
+                        else:
+                            actual_divisor = 1200
+
+                        bin_cumulative = defaultdict(float)
+                        receiver_cumulative_kg = 0.0
+                        water_cumulative_liters = 0.0
+
+                        for row in group_rows:
+                            sources = row.get('active_sources', [])
+                            if isinstance(sources, str):
+                                sources = json.loads(sources)
+                            for src in sources:
+                                bin_id = src.get('bin_id')
+                                weight_tph = float(src.get('weight', 0))
+                                kg_per_record = weight_tph * 1000 / actual_divisor
+                                bin_cumulative[bin_id] += kg_per_record
+
+                            receiver_tph = float(row.get('receiver', 0) or 0)
+                            receiver_kg_per_record = receiver_tph * 1000 / actual_divisor
+                            receiver_cumulative_kg += receiver_kg_per_record
+
+                            water_lh = float(row.get('water_consumed', 0) or 0)
+                            liters_per_record = water_lh / actual_divisor
+                            water_cumulative_liters += liters_per_record
+
+                        per_bin_json = json.dumps([
+                            {"bin_id": k, "total_weight": round(v, 3)}
+                            for k, v in bin_cumulative.items()
+                        ])
+
+                        total_bin_weight_kg = sum(bin_cumulative.values())
+                        produced_weight = round(total_bin_weight_kg + receiver_cumulative_kg, 3)
+
+                        latest = max(group_rows, key=lambda r: r.get('created_at') or datetime.datetime.min)
+
+                        # Extract FCL_2_520WE from latest record in this group
+                        fcl_2_520we_last = 0
+                        latest_fcl_receivers = latest.get('fcl_receivers', [])
+                        if isinstance(latest_fcl_receivers, str):
+                            latest_fcl_receivers = json.loads(latest_fcl_receivers)
+                        for rec in latest_fcl_receivers:
+                            if rec.get('id') == 'FCL_2_520WE':
+                                fcl_2_520we_last = float(rec.get('weight', 0))
+                                break
+                        if fcl_2_520we_last == 0:
+                            for row in group_rows:
+                                fcl_receivers_row = row.get('fcl_receivers', [])
+                                if isinstance(fcl_receivers_row, str):
+                                    fcl_receivers_row = json.loads(fcl_receivers_row)
+                                for rec in fcl_receivers_row:
+                                    if rec.get('id') == 'FCL_2_520WE':
+                                        weight = float(rec.get('weight', 0))
+                                        if weight > fcl_2_520we_last:
+                                            fcl_2_520we_last = weight
+
+                        for rec in latest_fcl_receivers:
+                            if rec.get('id') == 'FCL_2_520WE':
+                                rec['weight'] = fcl_2_520we_last
+
+                        # Extract real order start/end times from this group's rows
+                        start_times = [r.get('order_start_time') for r in group_rows if r.get('order_start_time')]
+                        end_times = [r.get('order_end_time') for r in group_rows if r.get('order_end_time')]
+                        archive_order_start = min(start_times) if start_times else None
+                        archive_order_end = max(end_times) if end_times else None
+
+                        logger.info(f"📦 [FCL Archive] Group '{actual_order_name}': {len(group_rows)} rows | Senders: {total_bin_weight_kg:.1f} kg | Receiver: {receiver_cumulative_kg:.1f} kg | Water: {water_cumulative_liters:.1f} L | Total: {produced_weight:.1f} kg | FCL_2_520WE: {fcl_2_520we_last:.0f} kg")
+
+                        cur.execute("""
+                            INSERT INTO fcl_monitor_logs_archive (
+                                job_status, line_running, receiver, fcl_receivers, flow_rate, produced_weight,
+                                water_consumed, moisture_offset, moisture_setpoint, cleaning_scale_bypass,
+                                active_sources, active_destination, order_name,
+                                per_bin_weights, created_at, order_start_time, order_end_time
+                            )
+                            VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s,
+                                    %s::jsonb, %s::jsonb, %s,
+                                    %s::jsonb, %s, %s, %s)
+                        """, (
+                            latest['job_status'],
+                            latest['line_running'],
+                            round(receiver_cumulative_kg, 3),
+                            json.dumps(latest_fcl_receivers),
+                            latest['flow_rate'],
+                            produced_weight,
+                            round(water_cumulative_liters, 3),
+                            latest['moisture_offset'],
+                            latest['moisture_setpoint'],
+                            latest.get('cleaning_scale_bypass', False),
+                            json.dumps(latest['active_sources']),
+                            json.dumps(latest['active_destination']),
+                            actual_order_name,
+                            per_bin_json,
+                            archive_time,
+                            archive_order_start,
+                            archive_order_end,
+                        ))
+
+                    # Delete all archived live rows after all groups inserted
                     cur.execute("""
                         DELETE FROM fcl_monitor_logs
                         WHERE created_at < date_trunc('hour', NOW())
                     """)
                     conn.commit()
 
-                    logger.info(f"✅ FCL archive inserted and {len(rows)} logs deleted. | Archive Time: {archive_time}")
+                    logger.info(f"✅ FCL archive: {len(order_groups)} groups from {len(rows)} rows archived. | Archive Time: {archive_time}")
 
         except Exception as e:
             logger.error(f"❌ Archive failed: {e}", exc_info=True)
@@ -1453,7 +1444,9 @@ def archive_old_scl_logs():
                             active_destination JSONB,
                             order_name TEXT,
                             per_bin_weights JSONB,
-                            created_at TIMESTAMP
+                            created_at TIMESTAMP,
+                            order_start_time TIMESTAMP,
+                            order_end_time TIMESTAMP
                         );
                     """)
 
@@ -1475,101 +1468,100 @@ def archive_old_scl_logs():
                         gevent.sleep(wait_seconds)
                         continue
 
-                    # 3. Build CUMULATIVE per-bin weights (convert t/h → kg for each record)
-                    # ✅ Calculate divisor dynamically based on actual record count and time span
-                    first_time = min(r.get('created_at') for r in rows if r.get('created_at'))
-                    last_time = max(r.get('created_at') for r in rows if r.get('created_at'))
-                    time_span_seconds = (last_time - first_time).total_seconds()
-                    
-                    # Calculate actual divisor based on records per hour
-                    if time_span_seconds > 0:
-                        time_span_hours = time_span_seconds / 3600
-                        actual_divisor = len(rows) / time_span_hours
-                    else:
-                        actual_divisor = 1200  # Fallback
-                    
-                    logger.info(f"📊 [SCL Archive] Time span: {time_span_seconds:.0f}s | Records: {len(rows)} | Divisor: {actual_divisor:.0f} (records/hour)")
-                    
-                    bin_cumulative = defaultdict(float)
-                    receiver_cumulative_kg = 0.0
+                    # Group rows by order_name so each order gets its own archive row
+                    from collections import OrderedDict
+                    order_groups = OrderedDict()
+                    for r in rows:
+                        oname = r.get('order_name') or '__idle__'
+                        order_groups.setdefault(oname, []).append(r)
 
-                    for row in rows:
-                        sources = row.get('active_sources', [])
-                        if isinstance(sources, str):
-                            sources = json.loads(sources)
+                    for group_order_name, group_rows in order_groups.items():
+                        actual_order_name = None if group_order_name == '__idle__' else group_order_name
 
-                        # ✅ Convert each sender's flow rate (t/h) to kg per record using ACTUAL divisor
-                        for src in sources:
-                            bin_id = src.get('bin_id')
-                            flowrate_tph = float(src.get('flowrate_tph', 0))  # t/h
-                            kg_per_record = flowrate_tph * 1000 / actual_divisor  # ✅ Dynamic divisor!
-                            bin_cumulative[bin_id] += kg_per_record  # Accumulate kg
-                            logger.debug(f"[SCL Archive] bin_id={bin_id}, flowrate={flowrate_tph} t/h → {kg_per_record:.3f} kg/record")
+                        first_time = min(r.get('created_at') for r in group_rows if r.get('created_at'))
+                        last_time = max(r.get('created_at') for r in group_rows if r.get('created_at'))
+                        time_span_seconds = (last_time - first_time).total_seconds()
+                        if time_span_seconds > 0:
+                            time_span_hours = time_span_seconds / 3600
+                            actual_divisor = len(group_rows) / time_span_hours
+                        else:
+                            actual_divisor = 1200
 
-                        # ✅ Convert receiver flow rate (t/h) to kg per record using ACTUAL divisor
-                        receiver_tph = float(row.get('receiver') or 0)  # t/h
-                        receiver_kg_per_record = receiver_tph * 1000 / actual_divisor  # ✅ Dynamic divisor!
-                        receiver_cumulative_kg += receiver_kg_per_record
+                        bin_cumulative = defaultdict(float)
+                        receiver_cumulative_kg = 0.0
 
-                    # 4. Store cumulative kg for each bin
-                    per_bin_json = json.dumps([
-                        {"bin_id": k, "total_weight": round(v, 3)}  # kg
-                        for k, v in bin_cumulative.items()
-                    ])
+                        for row in group_rows:
+                            sources = row.get('active_sources', [])
+                            if isinstance(sources, str):
+                                sources = json.loads(sources)
+                            for src in sources:
+                                bin_id = src.get('bin_id')
+                                flowrate_tph = float(src.get('flowrate_tph', 0))
+                                kg_per_record = flowrate_tph * 1000 / actual_divisor
+                                bin_cumulative[bin_id] += kg_per_record
 
-                    # Total produced = receiver flow (kg) (which matches sender flow)
-                    total_bin_weight_kg = sum(bin_cumulative.values())
-                    
-                    # ✅ Force receiver to match sender total (Input = Output) for consistency
-                    receiver_cumulative_kg = total_bin_weight_kg
-                    
-                    produced_weight = round(receiver_cumulative_kg, 3)
+                            receiver_tph = float(row.get('receiver') or 0)
+                            receiver_kg_per_record = receiver_tph * 1000 / actual_divisor
+                            receiver_cumulative_kg += receiver_kg_per_record
 
-                    # ✅ Safety Check: Max capacity 24,000 kg/hour
-                    if produced_weight > 24000:
-                         logger.warning(f"⚠️ [SCL Archive] Produced weight {produced_weight} kg > 24000 kg! Capping at 24000.")
-                         produced_weight = 24000
-                    
-                    logger.info(f"📦 [SCL Archive] Records: {len(rows)} | Senders: {total_bin_weight_kg:.1f} kg | Receiver: {receiver_cumulative_kg:.1f} kg | Produced (Capped): {produced_weight:.1f} kg")
+                        per_bin_json = json.dumps([
+                            {"bin_id": k, "total_weight": round(v, 3)}
+                            for k, v in bin_cumulative.items()
+                        ])
 
-                    # 5. Use latest record metadata
-                    latest = max(rows, key=lambda r: r.get('created_at') or datetime.datetime.min)
+                        total_bin_weight_kg = sum(bin_cumulative.values())
+                        receiver_cumulative_kg = total_bin_weight_kg
+                        produced_weight = round(receiver_cumulative_kg, 3)
 
-                    # 6. Insert into archive with cumulative kg values
-                    cur.execute("""
-                        INSERT INTO scl_monitor_logs_archive (
-                            job_status, line_running, receiver, flow_rate, produced_weight,
-                            water_consumed, moisture_offset, moisture_setpoint,
-                            active_sources, active_destination, order_name,
-                            per_bin_weights, created_at
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
-                                %s::jsonb, %s::jsonb, %s,
-                                %s::jsonb, %s)
-                    """, (
-                        latest['job_status'],
-                        latest['line_running'],
-                        round(receiver_cumulative_kg, 3),  # ✅ Cumulative kg, not summed t/h
-                        latest['flow_rate'],
-                        produced_weight,  # ✅ Total cumulative kg (senders + receiver)
-                        latest['water_consumed'],
-                        latest['moisture_offset'],
-                        latest['moisture_setpoint'],
-                        json.dumps(latest['active_sources']),
-                        json.dumps(latest['active_destination']),
-                        latest['order_name'],
-                        per_bin_json,  # ✅ Per-bin cumulative kg
-                        archive_time  # ✅ Explicit Dubai timezone timestamp
-                    ))
+                        if produced_weight > 24000:
+                            logger.warning(f"⚠️ [SCL Archive] Produced weight {produced_weight} kg > 24000 kg! Capping at 24000.")
+                            produced_weight = 24000
 
-                    # 7. Delete only now that insert is done
+                        latest = max(group_rows, key=lambda r: r.get('created_at') or datetime.datetime.min)
+
+                        start_times = [r.get('order_start_time') for r in group_rows if r.get('order_start_time')]
+                        end_times = [r.get('order_end_time') for r in group_rows if r.get('order_end_time')]
+                        archive_order_start = min(start_times) if start_times else None
+                        archive_order_end = max(end_times) if end_times else None
+
+                        logger.info(f"📦 [SCL Archive] Group '{actual_order_name}': {len(group_rows)} rows | Senders: {total_bin_weight_kg:.1f} kg | Receiver: {receiver_cumulative_kg:.1f} kg | Produced: {produced_weight:.1f} kg")
+
+                        cur.execute("""
+                            INSERT INTO scl_monitor_logs_archive (
+                                job_status, line_running, receiver, flow_rate, produced_weight,
+                                water_consumed, moisture_offset, moisture_setpoint,
+                                active_sources, active_destination, order_name,
+                                per_bin_weights, created_at, order_start_time, order_end_time
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
+                                    %s::jsonb, %s::jsonb, %s,
+                                    %s::jsonb, %s, %s, %s)
+                        """, (
+                            latest['job_status'],
+                            latest['line_running'],
+                            round(receiver_cumulative_kg, 3),
+                            latest['flow_rate'],
+                            produced_weight,
+                            latest['water_consumed'],
+                            latest['moisture_offset'],
+                            latest['moisture_setpoint'],
+                            json.dumps(latest['active_sources']),
+                            json.dumps(latest['active_destination']),
+                            actual_order_name,
+                            per_bin_json,
+                            archive_time,
+                            archive_order_start,
+                            archive_order_end,
+                        ))
+
+                    # Delete all archived live rows after all groups inserted
                     cur.execute("""
                         DELETE FROM scl_monitor_logs
                         WHERE created_at < date_trunc('hour', NOW())
                     """)
 
                     conn.commit()
-                    logger.info(f"✅ SCL archive inserted. {len(rows)} rows archived and deleted from live table. | Archive Time: {archive_time}")
+                    logger.info(f"✅ SCL archive: {len(order_groups)} groups from {len(rows)} rows archived. | Archive Time: {archive_time}")
 
         except Exception as e:
             logger.error(f"❌ Archive SCL failed: {e}", exc_info=True)
@@ -1628,7 +1620,9 @@ def archive_old_ftra_logs():
                             active_sources JSONB,
                             order_name TEXT,
                             per_bin_weights JSONB,
-                            created_at TIMESTAMP
+                            created_at TIMESTAMP,
+                            order_start_time TIMESTAMP,
+                            order_end_time TIMESTAMP
                         );
                     """)
 
@@ -1650,112 +1644,113 @@ def archive_old_ftra_logs():
                         gevent.sleep(wait_seconds)
                         continue
 
-                    # 3. Build CUMULATIVE per-bin weights (convert t/h → kg for each record)
-                    first_time = min(r.get('created_at') for r in rows if r.get('created_at'))
-                    last_time = max(r.get('created_at') for r in rows if r.get('created_at'))
-                    time_span_seconds = (last_time - first_time).total_seconds()
-                    
-                    # Calculate actual divisor based on records per hour
-                    if time_span_seconds > 0:
-                        time_span_hours = time_span_seconds / 3600
-                        actual_divisor = len(rows) / time_span_hours
-                    else:
-                        actual_divisor = 1200  # Fallback
-                    
-                    logger.info(f"📊 [FTRA Archive] Time span: {time_span_seconds:.0f}s | Records: {len(rows)} | Divisor: {actual_divisor:.0f} (records/hour)")
-                    
-                    bin_cumulative = defaultdict(float)
-                    receiver_cumulative_kg = 0.0
+                    # Group rows by order_name so each order gets its own archive row
+                    from collections import OrderedDict
+                    order_groups = OrderedDict()
+                    for r in rows:
+                        oname = r.get('order_name') or '__idle__'
+                        order_groups.setdefault(oname, []).append(r)
 
-                    for row in rows:
-                        sources = row.get('active_sources', [])
-                        if isinstance(sources, str):
-                            sources = json.loads(sources)
+                    for group_order_name, group_rows in order_groups.items():
+                        actual_order_name = None if group_order_name == '__idle__' else group_order_name
 
-                        # ✅ Convert each sender's flow rate (t/h) to kg per record using ACTUAL divisor
-                        for src in sources:
-                            bin_id = src.get('bin_id')
-                            weight_tph = float(src.get('weight', 0))  # t/h
-                            kg_per_record = weight_tph * 1000 / actual_divisor
-                            bin_cumulative[bin_id] += kg_per_record
-                            logger.debug(f"[FTRA Archive] bin_id={bin_id}, weight={weight_tph} t/h → {kg_per_record:.3f} kg/record")
+                        first_time = min(r.get('created_at') for r in group_rows if r.get('created_at'))
+                        last_time = max(r.get('created_at') for r in group_rows if r.get('created_at'))
+                        time_span_seconds = (last_time - first_time).total_seconds()
+                        if time_span_seconds > 0:
+                            time_span_hours = time_span_seconds / 3600
+                            actual_divisor = len(group_rows) / time_span_hours
+                        else:
+                            actual_divisor = 1200
 
-                        # ✅ Convert receiver flow rate (t/h) to kg per record using ACTUAL divisor
-                        receiver_tph = float(row.get('receiver_weight') or 0)  # t/h
-                        receiver_kg_per_record = receiver_tph * 1000 / actual_divisor
-                        receiver_cumulative_kg += receiver_kg_per_record
+                        bin_cumulative = defaultdict(float)
+                        receiver_cumulative_kg = 0.0
 
-                    # 4. Store cumulative kg for each bin
-                    per_bin_json = json.dumps([
-                        {"bin_id": k, "total_weight": round(v, 3)}  # kg
-                        for k, v in bin_cumulative.items()
-                    ])
+                        for row in group_rows:
+                            sources = row.get('active_sources', [])
+                            if isinstance(sources, str):
+                                sources = json.loads(sources)
+                            for src in sources:
+                                bin_id = src.get('bin_id')
+                                weight_tph = float(src.get('weight', 0))
+                                kg_per_record = weight_tph * 1000 / actual_divisor
+                                bin_cumulative[bin_id] += kg_per_record
 
-                    # Total produced = receiver flow (kg) (which matches sender flow)
-                    total_bin_weight_kg = sum(bin_cumulative.values())
-                    
-                    # ✅ Force receiver to match sender total (Input = Output) for consistency
-                    receiver_cumulative_kg = total_bin_weight_kg
-                    
-                    produced_weight = round(receiver_cumulative_kg, 3)
+                            receiver_tph = float(row.get('receiver_weight') or 0)
+                            receiver_kg_per_record = receiver_tph * 1000 / actual_divisor
+                            receiver_cumulative_kg += receiver_kg_per_record
 
-                    # ✅ Safety Check: Max capacity 24,000 kg/hour
-                    if produced_weight > 24000:
-                        logger.warning(f"⚠️ [FTRA Archive] Produced weight {produced_weight} kg > 24000 kg! Capping at 24000.")
-                        produced_weight = 24000
-                    
-                    logger.info(f"📦 [FTRA Archive] Records: {len(rows)} | Senders: {total_bin_weight_kg:.1f} kg | Receiver: {receiver_cumulative_kg:.1f} kg | Produced (Capped): {produced_weight:.1f} kg")
+                        per_bin_json = json.dumps([
+                            {"bin_id": k, "total_weight": round(v, 3)}
+                            for k, v in bin_cumulative.items()
+                        ])
 
-                    # 5. Use latest record metadata
-                    latest = max(rows, key=lambda r: r.get('created_at') or datetime.datetime.min)
+                        total_bin_weight_kg = sum(bin_cumulative.values())
+                        receiver_cumulative_kg = total_bin_weight_kg
+                        produced_weight = round(receiver_cumulative_kg, 3)
 
-                    # 6. Insert into archive with cumulative kg values
-                    cur.execute("""
-                        INSERT INTO ftra_monitor_logs_archive (
-                            receiver_bin_id, sender_1_bin_id, sender_2_bin_id,
-                            feeder_3_target, feeder_3_selected,
-                            feeder_4_target, feeder_4_selected,
-                            feeder_5_target, feeder_5_selected,
-                            feeder_6_target, feeder_6_selected,
-                            speed_discharge_50, speed_discharge_51_55,
-                            bag_collection, mixing_screw,
-                            line_running, receiver_weight, produced_weight,
-                            active_sources, order_name, per_bin_weights, created_at
-                        )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s)
-                    """, (
-                        latest['receiver_bin_id'],
-                        latest['sender_1_bin_id'],
-                        latest['sender_2_bin_id'],
-                        latest['feeder_3_target'],
-                        latest['feeder_3_selected'],
-                        latest['feeder_4_target'],
-                        latest['feeder_4_selected'],
-                        latest['feeder_5_target'],
-                        latest['feeder_5_selected'],
-                        latest['feeder_6_target'],
-                        latest['feeder_6_selected'],
-                        latest['speed_discharge_50'],
-                        latest['speed_discharge_51_55'],
-                        latest['bag_collection'],
-                        latest['mixing_screw'],
-                        latest['line_running'],
-                        round(receiver_cumulative_kg, 3),
-                        produced_weight,
-                        json.dumps(latest['active_sources']),
-                        latest['order_name'],
-                        per_bin_json,
-                        archive_time
-                    ))
+                        if produced_weight > 24000:
+                            logger.warning(f"⚠️ [FTRA Archive] Produced weight {produced_weight} kg > 24000 kg! Capping at 24000.")
+                            produced_weight = 24000
 
-                    # 7. Delete only now that insert is done
+                        latest = max(group_rows, key=lambda r: r.get('created_at') or datetime.datetime.min)
+
+                        start_times = [r.get('order_start_time') for r in group_rows if r.get('order_start_time')]
+                        end_times = [r.get('order_end_time') for r in group_rows if r.get('order_end_time')]
+                        archive_order_start = min(start_times) if start_times else None
+                        archive_order_end = max(end_times) if end_times else None
+
+                        logger.info(f"📦 [FTRA Archive] Group '{actual_order_name}': {len(group_rows)} rows | Senders: {total_bin_weight_kg:.1f} kg | Receiver: {receiver_cumulative_kg:.1f} kg | Produced: {produced_weight:.1f} kg")
+
+                        cur.execute("""
+                            INSERT INTO ftra_monitor_logs_archive (
+                                receiver_bin_id, sender_1_bin_id, sender_2_bin_id,
+                                feeder_3_target, feeder_3_selected,
+                                feeder_4_target, feeder_4_selected,
+                                feeder_5_target, feeder_5_selected,
+                                feeder_6_target, feeder_6_selected,
+                                speed_discharge_50, speed_discharge_51_55,
+                                bag_collection, mixing_screw,
+                                line_running, receiver_weight, produced_weight,
+                                active_sources, order_name, per_bin_weights, created_at,
+                                order_start_time, order_end_time
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::jsonb, %s, %s, %s)
+                        """, (
+                            latest['receiver_bin_id'],
+                            latest['sender_1_bin_id'],
+                            latest['sender_2_bin_id'],
+                            latest['feeder_3_target'],
+                            latest['feeder_3_selected'],
+                            latest['feeder_4_target'],
+                            latest['feeder_4_selected'],
+                            latest['feeder_5_target'],
+                            latest['feeder_5_selected'],
+                            latest['feeder_6_target'],
+                            latest['feeder_6_selected'],
+                            latest['speed_discharge_50'],
+                            latest['speed_discharge_51_55'],
+                            latest['bag_collection'],
+                            latest['mixing_screw'],
+                            latest['line_running'],
+                            round(receiver_cumulative_kg, 3),
+                            produced_weight,
+                            json.dumps(latest['active_sources']),
+                            actual_order_name,
+                            per_bin_json,
+                            archive_time,
+                            archive_order_start,
+                            archive_order_end,
+                        ))
+
+                    # Delete all archived live rows after all groups inserted
                     cur.execute("""
                         DELETE FROM ftra_monitor_logs
                         WHERE created_at < date_trunc('hour', NOW())
                     """)
 
                     conn.commit()
-                    logger.info(f"✅ FTRA archive inserted. {len(rows)} rows archived and deleted from live table. | Archive Time: {archive_time}")
+                    logger.info(f"✅ FTRA archive: {len(order_groups)} groups from {len(rows)} rows archived. | Archive Time: {archive_time}")
 
         except Exception as e:
             logger.error(f"❌ Archive FTRA failed: {e}", exc_info=True)
@@ -2419,11 +2414,12 @@ monitor_running = False
 fcl_order_counter = 1
 fcl_current_order_name = None
 fcl_session_started = None
+fcl_session_ended = None
 fcl_last_job_status = None
 
 def fcl_realtime_monitor():
     global monitor_running, fcl_order_counter
-    global fcl_current_order_name, fcl_session_started, fcl_last_job_status
+    global fcl_current_order_name, fcl_session_started, fcl_session_ended, fcl_last_job_status
 
     monitor_running = True
     
@@ -2457,20 +2453,24 @@ def fcl_realtime_monitor():
 
             logger.debug(f"FCL Monitor Loop: job_status={job_status}, line_running={line_running}, current_order={fcl_current_order_name}")
 
+            fcl_order_ending = False
+
             # 🟢 Start/Create order when job_status == 1 (order_active)
             if job_status == 1:
                 if not fcl_current_order_name or not fcl_session_started:
-                    # Create new order
                     fcl_session_started = now
+                    fcl_session_ended = None
                     fcl_current_order_name = f"FCL{fcl_order_counter}"
                     fcl_order_counter += 1
-                    logger.info(f"🆕 FCL order started: {fcl_current_order_name} (job_status=1)")
+                    logger.info(f"🆕 FCL order started: {fcl_current_order_name} at {now} (job_status=1)")
                 fcl_last_job_status = 1
 
-            # 🔴 End current order when job_status == 0 (order_done) - clear name *after* insert so this row keeps order_name
+            # 🔴 End current order when job_status == 0 (order_done) - defer clearing until after INSERT
             elif job_status == 0:
                 if fcl_current_order_name:
-                    logger.info(f"✅ FCL order done: {fcl_current_order_name} (job_status=0) - will clear after insert")
+                    fcl_session_ended = now
+                    logger.info(f"✅ FCL order done: {fcl_current_order_name} at {now} (job_status=0) - will clear after insert")
+                    fcl_order_ending = True
                 fcl_last_job_status = 0
 
             # ✅ Order name creation (only when line is running)
@@ -2552,24 +2552,27 @@ def fcl_realtime_monitor():
                         INSERT INTO fcl_monitor_logs (
                             job_status, line_running, receiver, fcl_receivers, flow_rate, produced_weight,
                             water_consumed, moisture_offset, moisture_setpoint, cleaning_scale_bypass,
-                            active_sources, active_destination, order_name, created_at
+                            active_sources, active_destination, order_name, created_at,
+                            order_start_time, order_end_time
                         ) VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s,
-                                  %s::jsonb, %s::jsonb, %s, %s)
+                                  %s::jsonb, %s::jsonb, %s, %s, %s, %s)
                     """, (
                         job_status,
-                        data.get("line_running"),  # Store actual line_running value (true/false)
-                        receiver_weight,  # ✅ Only flow rate (t/h), not cumulative
+                        data.get("line_running"),
+                        receiver_weight,
                         json.dumps(fcl_receivers),
                         data.get("flow_rate"),
-                        produced_weight,  # ✅ Sum of all flow rates (t/h)
-                        (data.get("water_flow_lh") or data.get("water_consumed")) or 0,  # ✅ Rate l/h (same as receiver; archive sums over hour)
+                        produced_weight,
+                        (data.get("water_flow_lh") or data.get("water_consumed")) or 0,
                         data.get("moisture_offset"),
                         data.get("moisture_setpoint"),
-                        data.get("cleaning_scale_bypass"), # ✅ New field
+                        data.get("cleaning_scale_bypass"),
                         json.dumps(enriched_sources),
                         json.dumps(data.get("active_destination")),
-                        fcl_current_order_name,  # May be None if line not running
-                        now  # ✅ Explicit Asia/Dubai timestamp
+                        fcl_current_order_name,
+                        now,
+                        fcl_session_started,
+                        fcl_session_ended,
                     ))
                     conn.commit()
                     logger.info(f"✅ FCL log saved: {fcl_current_order_name or 'NO_ORDER'} | Job Status: {job_status} | Line Running: {line_running} | Sender: {total_sender_weight:.3f} t/h | Receiver: {receiver_weight:.3f} t/h | Produced: {produced_weight:.3f} t/h | Time: {now}")
@@ -2577,10 +2580,10 @@ def fcl_realtime_monitor():
                 logger.error(f"❌ DB insert failed: {db_err}", exc_info=True)
 
             fcl_last_job_status = job_status
-            # ✅ Clear order name only after insert so the "order just ended" row still has order_name (live + archive)
-            if job_status == 0 and fcl_current_order_name:
+            if fcl_order_ending:
                 fcl_current_order_name = None
                 fcl_session_started = None
+                fcl_session_ended = None
 
         except Exception as e:
             logger.error(f"❌ FCL monitor error: {e}", exc_info=True)
@@ -2595,12 +2598,13 @@ def fcl_realtime_monitor():
 scl_monitor_running = False
 scl_current_order_name = None
 scl_session_started = None
+scl_session_ended = None
 scl_order_counter = 1
 scl_last_job_status = None
 scl_data_stored = False
 
 def scl_realtime_monitor():
-    global scl_monitor_running, scl_current_order_name, scl_session_started, scl_order_counter, scl_last_job_status
+    global scl_monitor_running, scl_current_order_name, scl_session_started, scl_session_ended, scl_order_counter, scl_last_job_status
     global scl_data_stored
 
     scl_monitor_running = True
@@ -2627,23 +2631,25 @@ def scl_realtime_monitor():
             line_running = data.get("line_running", False)
             now = datetime.datetime.now()
 
+            scl_order_ending = False
+
             # 🟢 Start/Create order when job_status == 1 (order_active)
             if job_status == 1:
                 if not scl_current_order_name or not scl_session_started:
-                    # Create new order
                     scl_session_started = now
+                    scl_session_ended = None
                     scl_current_order_name = f"SCL{scl_order_counter}"
                     scl_order_counter += 1
                     scl_last_job_status = 1
                     scl_data_stored = False
-                    logger.info(f"🆕 SCL order started: {scl_current_order_name} (job_status=1)")
+                    logger.info(f"🆕 SCL order started: {scl_current_order_name} at {now} (job_status=1)")
 
-            # 🔴 End current order when job_status == 0 (order_done) - DO NOT create new order yet
+            # 🔴 End current order when job_status == 0 (order_done) - defer clearing until after INSERT
             elif job_status == 0:
                 if scl_current_order_name:
-                    logger.info(f"✅ SCL order done: {scl_current_order_name} (job_status=0) - waiting for next order")
-                    scl_current_order_name = None  # Clear order name, wait for next job_status=1
-                    scl_session_started = None
+                    scl_session_ended = now
+                    logger.info(f"✅ SCL order done: {scl_current_order_name} at {now} (job_status=0) - will clear after insert")
+                    scl_order_ending = True
                     scl_last_job_status = 0
                     scl_data_stored = False
 
@@ -2715,27 +2721,29 @@ def scl_realtime_monitor():
                             );
                         """)
 
-                        # Insert log
                         cursor.execute("""
                             INSERT INTO scl_monitor_logs (
                                 job_status, line_running, receiver, flow_rate, produced_weight,
                                 water_consumed, moisture_offset, moisture_setpoint,
-                                active_sources, active_destination, order_name, created_at
+                                active_sources, active_destination, order_name, created_at,
+                                order_start_time, order_end_time
                             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
-                                      %s::jsonb, %s::jsonb, %s, %s)
+                                      %s::jsonb, %s::jsonb, %s, %s, %s, %s)
                         """, (
                             job_status,
                             data.get("line_running"),
-                            receiver_weight,  # ✅ Use calculated receiver weight (t/h)
+                            receiver_weight,
                             data.get("Flowrate"),
                             produced_weight,
                             0,
                             data.get("MoistureOffset"),
                             data.get("MoistureSetpoint"),
                             json.dumps(data.get("ActiveSources")),
-                            json.dumps(active_destination),  # ✅ Use constructed active_destination
+                            json.dumps(active_destination),
                             scl_current_order_name,
-                            now  # ✅ Explicit Asia/Dubai timestamp
+                            now,
+                            scl_session_started,
+                            scl_session_ended,
                         ))
 
                         conn.commit()
@@ -2749,6 +2757,11 @@ def scl_realtime_monitor():
             else:
                 # Line not running - don't store data
                 logger.debug(f"[SCL] Line not running (line_running={line_running}), skipping data storage")
+
+            if scl_order_ending:
+                scl_current_order_name = None
+                scl_session_started = None
+                scl_session_ended = None
 
         except Exception as e:
             logger.error(f"❌ SCL monitor error: {e}", exc_info=True)
@@ -2765,12 +2778,13 @@ def scl_realtime_monitor():
 ftra_monitor_running = False
 ftra_current_order_name = None
 ftra_session_started = None
+ftra_session_ended = None
 ftra_order_counter = 1
 ftra_last_line_running = False
 ftra_data_stored = False
 
 def ftra_realtime_monitor():
-    global ftra_monitor_running, ftra_current_order_name, ftra_session_started, ftra_order_counter
+    global ftra_monitor_running, ftra_current_order_name, ftra_session_started, ftra_session_ended, ftra_order_counter
     global ftra_last_line_running, ftra_data_stored
 
     ftra_monitor_running = True
@@ -2799,22 +2813,24 @@ def ftra_realtime_monitor():
             line_running = data.get("OrderActive", False)  # ✅ Use PLC bit at offset 106
             now = datetime.datetime.now()
 
+            ftra_order_ending = False
+
             # 🟢 Start/Create order when line starts running
             if line_running:
                 if not ftra_current_order_name or not ftra_session_started:
-                    # Create new order
                     ftra_session_started = now
+                    ftra_session_ended = None
                     ftra_current_order_name = f"FTRA{ftra_order_counter}"
                     ftra_order_counter += 1
                     ftra_data_stored = False
-                    logger.info(f"🆕 FTRA order started: {ftra_current_order_name}")
+                    logger.info(f"🆕 FTRA order started: {ftra_current_order_name} at {now}")
 
-            # 🔴 End current order when line stops running
+            # 🔴 End current order when line stops running - defer clearing until after INSERT
             elif not line_running:
                 if ftra_current_order_name:
-                    logger.info(f"✅ FTRA order done: {ftra_current_order_name} - waiting for next order")
-                    ftra_current_order_name = None
-                    ftra_session_started = None
+                    ftra_session_ended = now
+                    logger.info(f"✅ FTRA order done: {ftra_current_order_name} at {now} - will clear after insert")
+                    ftra_order_ending = True
                     ftra_data_stored = False
 
             # ✅ Only store data when line_running == true
@@ -2877,7 +2893,6 @@ def ftra_realtime_monitor():
                             );
                         """)
 
-                        # Insert log
                         cursor.execute("""
                             INSERT INTO ftra_monitor_logs (
                                 receiver_bin_id, sender_1_bin_id, sender_2_bin_id,
@@ -2888,8 +2903,9 @@ def ftra_realtime_monitor():
                                 speed_discharge_50, speed_discharge_51_55,
                                 bag_collection, mixing_screw,
                                 line_running, receiver_weight, produced_weight,
-                                active_sources, order_name, created_at
-                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                                active_sources, order_name, created_at,
+                                order_start_time, order_end_time
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
                         """, (
                             data.get("ReceiverBinId"),
                             data.get("Sender1BinId"),
@@ -2911,7 +2927,9 @@ def ftra_realtime_monitor():
                             produced_weight,
                             json.dumps(active_sources),
                             ftra_current_order_name,
-                            now
+                            now,
+                            ftra_session_started,
+                            ftra_session_ended,
                         ))
 
                         conn.commit()
@@ -2925,6 +2943,11 @@ def ftra_realtime_monitor():
             else:
                 # Line not running - don't store data
                 logger.debug(f"[FTRA] Line not running, skipping data storage")
+
+            if ftra_order_ending:
+                ftra_current_order_name = None
+                ftra_session_started = None
+                ftra_session_ended = None
 
         except Exception as e:
             logger.error(f"❌ FTRA monitor error: {e}", exc_info=True)

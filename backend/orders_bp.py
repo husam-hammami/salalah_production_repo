@@ -2896,7 +2896,14 @@ def get_fcl_full():
                     """)
                 rows = cursor.fetchall()
                 rows = list(reversed(rows))  # ASC for UI
-            return jsonify({'status': 'success', 'data': rows}), 200
+            out = []
+            for r in rows:
+                row = dict(r)
+                for dt_col in ('created_at', 'order_start_time', 'order_end_time'):
+                    if row.get(dt_col) is not None and hasattr(row[dt_col], 'isoformat'):
+                        row[dt_col] = row[dt_col].isoformat()
+                out.append(row)
+            return jsonify({'status': 'success', 'data': out}), 200
 
 # --- SCL APIs ---
 
@@ -2942,7 +2949,14 @@ def get_scl_full():
                 """)
                 rows = cursor.fetchall()
                 rows = list(reversed(rows))  # ASC for UI
-            return jsonify({'status': 'success', 'data': rows}), 200
+            out = []
+            for r in rows:
+                row = dict(r)
+                for dt_col in ('created_at', 'order_start_time', 'order_end_time'):
+                    if row.get(dt_col) is not None and hasattr(row[dt_col], 'isoformat'):
+                        row[dt_col] = row[dt_col].isoformat()
+                out.append(row)
+            return jsonify({'status': 'success', 'data': out}), 200
 
 # --- MILA APIs ---
 
@@ -3651,9 +3665,9 @@ def _run_scl_summary(start_dubai, end_dubai, order_name=None):
             "per_bin_weight_totals": bin_weight_totals,
             "material_summary": material_summary,
             "receiver_weight": receiver_weight_totals,
-            "receiver_bin_id": receiver_bin_id,  # ✅ Add bin ID for frontend display
-            "start_time": rows[0].get("created_at"),  # ✅ First record in the range
-            "end_time": last_record.get("created_at")  # Last record in the range
+            "receiver_bin_id": receiver_bin_id,
+            "start_time": min([r.get("order_start_time") for r in rows if r.get("order_start_time")], default=rows[0].get("created_at")),
+            "end_time": max([r.get("order_end_time") for r in rows if r.get("order_end_time")], default=last_record.get("created_at"))
         }
     }), 200
 
@@ -3711,7 +3725,10 @@ def get_scl_analytics_summary():
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT MIN(created_at), MAX(created_at) FROM scl_monitor_logs_archive WHERE order_name = %s",
+                    """SELECT
+                        COALESCE(MIN(order_start_time), MIN(created_at)),
+                        COALESCE(MAX(order_end_time), MAX(created_at))
+                    FROM scl_monitor_logs_archive WHERE order_name = %s""",
                     (order_name,),
                 )
                 row = cur.fetchone()
@@ -4137,8 +4154,8 @@ def _run_fcl_summary(start_dubai, end_dubai, order_name, start_with_buffer, end_
         "receiver_material_name": "Cumulative Counter",  # First row name  
         "second_receiver_id": "FCL_2_520WE",  # Second row ID
         "second_receiver_material": "FCL 2_520WE", # Second row name
-        "start_time": first_record.get("created_at"),
-        "end_time": last_record.get("created_at")
+        "start_time": min([r.get("order_start_time") for r in rows if r.get("order_start_time")], default=first_record.get("created_at")),
+        "end_time": max([r.get("order_end_time") for r in rows if r.get("order_end_time")], default=last_record.get("created_at"))
     }
     
     # ✅ Log final summary for debugging
@@ -4226,7 +4243,10 @@ def get_fcl_analytics_summary():
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT MIN(created_at), MAX(created_at) FROM fcl_monitor_logs_archive WHERE order_name = %s",
+                    """SELECT
+                        COALESCE(MIN(order_start_time), MIN(created_at)),
+                        COALESCE(MAX(order_end_time), MAX(created_at))
+                    FROM fcl_monitor_logs_archive WHERE order_name = %s""",
                     (order_name,),
                 )
                 row = cur.fetchone()
@@ -4387,8 +4407,8 @@ def _run_ftra_summary(start_dubai, end_dubai, order_name=None):
             "speed_discharge_51_55": round(speed_discharge_51_55, 3),
             "bag_collection": bag_collection,
             "mixing_screw": mixing_screw,
-            "start_time": rows[0].get("created_at"),
-            "end_time": last_record.get("created_at")
+            "start_time": min([r.get("order_start_time") for r in rows if r.get("order_start_time")], default=rows[0].get("created_at")),
+            "end_time": max([r.get("order_end_time") for r in rows if r.get("order_end_time")], default=last_record.get("created_at"))
         }
     }), 200
 
@@ -4446,7 +4466,10 @@ def get_ftra_analytics_summary():
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT MIN(created_at), MAX(created_at) FROM ftra_monitor_logs_archive WHERE order_name = %s",
+                    """SELECT
+                        COALESCE(MIN(order_start_time), MIN(created_at)),
+                        COALESCE(MAX(order_end_time), MAX(created_at))
+                    FROM ftra_monitor_logs_archive WHERE order_name = %s""",
                     (order_name,),
                 )
                 row = cur.fetchone()
@@ -4513,7 +4536,14 @@ def get_ftra_full():
                     """)
                 rows = cursor.fetchall()
                 rows = list(reversed(rows))  # ASC for UI
-            return jsonify({'status': 'success', 'data': rows}), 200
+            out = []
+            for r in rows:
+                row = dict(r)
+                for dt_col in ('created_at', 'order_start_time', 'order_end_time'):
+                    if row.get(dt_col) is not None and hasattr(row[dt_col], 'isoformat'):
+                        row[dt_col] = row[dt_col].isoformat()
+                out.append(row)
+            return jsonify({'status': 'success', 'data': out}), 200
 
 # =============================================================================
 # Energy Monitoring Routes

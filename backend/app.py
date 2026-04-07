@@ -1211,6 +1211,13 @@ def delete_feeder_recipe(recipe_id):
         
 from collections import defaultdict
 import json
+
+# Live FCL/SCL/FTRA *_monitor_logs.created_at is naive Dubai wall time; Postgres NOW() is usually UTC.
+_SQL_LIVE_BEFORE_CURRENT_HOUR_DUBAI = (
+    "created_at < date_trunc('hour', NOW() AT TIME ZONE 'Asia/Dubai')"
+)
+
+
 def archive_old_logs():
     from collections import defaultdict
     import datetime
@@ -1228,9 +1235,9 @@ def archive_old_logs():
             with get_db_connection() as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     # 1. Select logs before current hour
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT * FROM fcl_monitor_logs
-                        WHERE created_at < date_trunc('hour', NOW())
+                        WHERE {_SQL_LIVE_BEFORE_CURRENT_HOUR_DUBAI}
                     """)
                     rows = cur.fetchall()
 
@@ -1388,9 +1395,9 @@ def archive_old_logs():
                         ))
 
                     # Delete all archived live rows after all groups inserted
-                    cur.execute("""
+                    cur.execute(f"""
                         DELETE FROM fcl_monitor_logs
-                        WHERE created_at < date_trunc('hour', NOW())
+                        WHERE {_SQL_LIVE_BEFORE_CURRENT_HOUR_DUBAI}
                     """)
                     conn.commit()
 
@@ -1451,10 +1458,10 @@ def archive_old_scl_logs():
                     """)
 
                     # 2. SELECT ONLY — do not delete yet
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT *
                         FROM scl_monitor_logs
-                        WHERE created_at < date_trunc('hour', NOW())
+                        WHERE {_SQL_LIVE_BEFORE_CURRENT_HOUR_DUBAI}
                     """)
                     rows = cur.fetchall()
 
@@ -1555,9 +1562,9 @@ def archive_old_scl_logs():
                         ))
 
                     # Delete all archived live rows after all groups inserted
-                    cur.execute("""
+                    cur.execute(f"""
                         DELETE FROM scl_monitor_logs
-                        WHERE created_at < date_trunc('hour', NOW())
+                        WHERE {_SQL_LIVE_BEFORE_CURRENT_HOUR_DUBAI}
                     """)
 
                     conn.commit()
@@ -1627,10 +1634,10 @@ def archive_old_ftra_logs():
                     """)
 
                     # 2. SELECT ONLY — do not delete yet
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT *
                         FROM ftra_monitor_logs
-                        WHERE created_at < date_trunc('hour', NOW())
+                        WHERE {_SQL_LIVE_BEFORE_CURRENT_HOUR_DUBAI}
                     """)
                     rows = cur.fetchall()
 
@@ -1744,9 +1751,9 @@ def archive_old_ftra_logs():
                         ))
 
                     # Delete all archived live rows after all groups inserted
-                    cur.execute("""
+                    cur.execute(f"""
                         DELETE FROM ftra_monitor_logs
-                        WHERE created_at < date_trunc('hour', NOW())
+                        WHERE {_SQL_LIVE_BEFORE_CURRENT_HOUR_DUBAI}
                     """)
 
                     conn.commit()

@@ -2409,6 +2409,15 @@ def mila_realtime_monitor():
 
 import datetime
 import json
+import pytz
+
+_DUBAI_TZ = pytz.timezone("Asia/Dubai")
+
+
+def _now_dubai_naive():
+    """Asia/Dubai wall time as naive datetime; use for session times and created_at together."""
+    return datetime.datetime.now(pytz.utc).astimezone(_DUBAI_TZ).replace(tzinfo=None)
+
 
 monitor_running = False
 fcl_order_counter = 1
@@ -2442,14 +2451,14 @@ def fcl_realtime_monitor():
             
             # ✅ Include fcl_receivers in the data being emitted
             data['fcl_receivers'] = fcl_receivers
-            
-            logger.info(f"[FCL] Loop Time: {datetime.datetime.now()} | Job Status: {data.get('job_status')} | Order: {fcl_current_order_name} | Receivers: {[r.get('id') for r in fcl_receivers]}")
-
-            socketio.emit("fcl_data", data)
 
             job_status = data.get("job_status")
             line_running = data.get("line_running", False)
-            now = datetime.datetime.now()
+            now = _now_dubai_naive()
+
+            logger.info(f"[FCL] Loop Time: {now} | Job Status: {job_status} | Order: {fcl_current_order_name} | Receivers: {[r.get('id') for r in fcl_receivers]}")
+
+            socketio.emit("fcl_data", data)
 
             logger.debug(f"FCL Monitor Loop: job_status={job_status}, line_running={line_running}, current_order={fcl_current_order_name}")
 
@@ -2519,13 +2528,6 @@ def fcl_realtime_monitor():
 
             # Insert log - ALWAYS store data regardless of line_running status
             try:
-                # ✅ Use Asia/Dubai timezone (UTC+4) for correct local timestamps
-                import pytz
-                from datetime import datetime as dt
-                dubai_tz = pytz.timezone('Asia/Dubai')
-                # Get current UTC time and convert to Dubai timezone (naive datetime for TIMESTAMP column)
-                now = dt.now(pytz.utc).astimezone(dubai_tz).replace(tzinfo=None)
-                
                 with get_db_connection() as conn:
                     cursor = conn.cursor()
                     cursor.execute("""
@@ -2623,13 +2625,13 @@ def scl_realtime_monitor():
                 continue
 
             data = json.loads(res.data.decode("utf-8")).get("data", {})
-            logger.info(f"[SCL] Loop Time: {datetime.datetime.now()} | Job Status: {data.get('JobStatusCode')} | Order: {scl_current_order_name}")
-
-            socketio.emit("scl_data", data)
-
             job_status = data.get("JobStatusCode")
             line_running = data.get("line_running", False)
-            now = datetime.datetime.now()
+            now = _now_dubai_naive()
+
+            logger.info(f"[SCL] Loop Time: {now} | Job Status: {job_status} | Order: {scl_current_order_name}")
+
+            socketio.emit("scl_data", data)
 
             scl_order_ending = False
 
@@ -2693,13 +2695,6 @@ def scl_realtime_monitor():
                     logger.info(f"[SCL] 📦 Active Destination: bin {dest_bin_id}, material: {dest_material.get('material_name', 'N/A')}")
                 
                 try:
-                    # ✅ Use Asia/Dubai timezone (UTC+4) for correct local timestamps
-                    import pytz
-                    from datetime import datetime as dt
-                    dubai_tz = pytz.timezone('Asia/Dubai')
-                    # Get current UTC time and convert to Dubai timezone (naive datetime for TIMESTAMP column)
-                    now = dt.now(pytz.utc).astimezone(dubai_tz).replace(tzinfo=None)
-                    
                     with get_db_connection() as conn:
                         cursor = conn.cursor()
                         # Ensure table with created_at
@@ -2803,15 +2798,13 @@ def ftra_realtime_monitor():
                 continue
 
             data = json.loads(res.data.decode("utf-8")).get("data", {})
-            logger.info(f"[FTRA] Loop Time: {datetime.datetime.now()} | Receiver: {data.get('ReceiverBinId')} | Senders: {[s.get('bin_id') for s in data.get('ActiveSources', [])]}")
-
-            socketio.emit("ftra_data", data)
-
-            # Check if line is running using PLC status bit at offset 106
-            # 1 = order_active (order started), 0 = order_done (order finished)
             active_sources = data.get("ActiveSources", [])
             line_running = data.get("OrderActive", False)  # ✅ Use PLC bit at offset 106
-            now = datetime.datetime.now()
+            now = _now_dubai_naive()
+
+            logger.info(f"[FTRA] Loop Time: {now} | Receiver: {data.get('ReceiverBinId')} | Senders: {[s.get('bin_id') for s in active_sources]}")
+
+            socketio.emit("ftra_data", data)
 
             ftra_order_ending = False
 
@@ -2857,12 +2850,6 @@ def ftra_realtime_monitor():
                 logger.info(f"[FTRA] 📊 Sender: {total_sender_weight:.3f} t/h | Receiver: {receiver_weight:.3f} t/h | Produced: {produced_weight:.3f} t/h")
 
                 try:
-                    # ✅ Use Asia/Dubai timezone (UTC+4) for correct local timestamps
-                    import pytz
-                    from datetime import datetime as dt
-                    dubai_tz = pytz.timezone('Asia/Dubai')
-                    now = dt.now(pytz.utc).astimezone(dubai_tz).replace(tzinfo=None)
-                    
                     with get_db_connection() as conn:
                         cursor = conn.cursor()
                         # Ensure table exists

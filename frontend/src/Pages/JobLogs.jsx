@@ -140,6 +140,25 @@ function aggregateFclOrderTotalizers(rows) {
   return { startTotalizer, endTotalizer };
 }
 
+/** FCL job produced (kg) = end − start on FCL_2_520WE; null if either side unknown. */
+function fclProducedFromTotalizers(startKg, endKg) {
+  const a = parseFloat(startKg);
+  const b = parseFloat(endKg);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  const d = b - a;
+  return d >= 0 ? d : 0;
+}
+
+function mergeFclTotalizerSnapshot(summary, fclOrderRow) {
+  let s = summary?.fcl_2_520we_at_order_start;
+  let e = summary?.fcl_2_520we_at_order_end;
+  if (fclOrderRow) {
+    if ((s == null || s === '') && fclOrderRow.startTotalizer != null) s = fclOrderRow.startTotalizer;
+    if ((e == null || e === '') && fclOrderRow.endTotalizer != null) e = fclOrderRow.endTotalizer;
+  }
+  return { start: s, end: e };
+}
+
 // Build material lookup from active_sources: bin_key -> material_name
 function getMaterialSummaryFromActiveSources(row) {
   let sources = row?.active_sources;
@@ -377,8 +396,10 @@ function buildJobList(archiveData, reportType) {
         const rec = buildFclReceiverStrings(lastRow);
         const snd = buildFclSenderStrings(lastRow);
         const { startTotalizer, endTotalizer } = aggregateFclOrderTotalizers(j.rows);
+        const producedFromTz = fclProducedFromTotalizers(startTotalizer, endTotalizer);
         return {
           ...base,
+          produced: producedFromTz,
           startTotalizer,
           endTotalizer,
           receiverSummary: rec.short,
@@ -724,7 +745,9 @@ export default function JobLogs() {
                     >
                       {job.senderSummary || '—'}
                     </td>
-                    <td className="px-3 py-2.5 text-center whitespace-nowrap">{formatReportKg(job.produced)}</td>
+                    <td className="px-3 py-2.5 text-center whitespace-nowrap">
+                      {selectedReport === 'FCL' ? formatFclProducedKg(job.produced) : formatReportKg(job.produced)}
+                    </td>
                     {selectedReport === 'FCL' ? (
                       <>
                         <td className="px-3 py-2.5 text-center whitespace-nowrap" title="FCL_2_520WE at order start">{formatFclTotalizerKg(job.startTotalizer)}</td>
@@ -776,14 +799,18 @@ export default function JobLogs() {
               </div>
               <div className="flex flex-wrap items-center gap-3">
                 {summaryData && !loadingSummary && (() => {
-                  const metrics = getProducedConsumedFromSummary(summaryData, selectedReport);
+                  const metrics = getProducedConsumedFromSummary(
+                    summaryData,
+                    selectedReport,
+                    selectedReport === 'FCL' ? selectedOrder : null,
+                  );
                   if (!metrics) return null;
                   if (selectedReport === 'FCL') {
                     return (
                       <>
                         <div className="rounded-xl bg-gray-50 dark:bg-zinc-700/50 border border-gray-200 dark:border-zinc-600 px-4 py-3 text-center min-w-[120px]">
                           <div className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-400 mb-0.5">Produced</div>
-                          <div className="text-xl md:text-2xl font-bold text-gray-900 dark:text-gray-100">{formatReportKg(metrics.produced)}</div>
+                          <div className="text-xl md:text-2xl font-bold text-gray-900 dark:text-gray-100">{formatFclProducedKg(metrics.produced)}</div>
                         </div>
                         <div className="rounded-xl bg-gray-50 dark:bg-zinc-700/50 border border-gray-200 dark:border-zinc-600 px-4 py-3 text-center min-w-[120px]">
                           <div className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-400 mb-0.5">Start totalizer</div>
@@ -823,7 +850,19 @@ export default function JobLogs() {
             ) : summaryData && selectedReport === 'MILL-A' ? (
               <MilaReportView summary={summaryData} selectedOrderName={selectedOrder.order_name} />
             ) : summaryData && (selectedReport === 'FCL' || selectedReport === 'SCL' || selectedReport === 'FTRA') ? (
-              <SummaryCardReportView summary={summaryData} reportType={selectedReport} selectedOrderName={selectedOrder.order_name} />
+              <SummaryCardReportView
+                summary={summaryData}
+                reportType={selectedReport}
+                selectedOrderName={selectedOrder.order_name}
+                fclOutputBinKg={
+                  selectedReport === 'FCL'
+                    ? (() => {
+                        const m = getProducedConsumedFromSummary(summaryData, 'FCL', selectedOrder);
+                        return m ? m.produced : undefined;
+                      })()
+                    : undefined
+                }
+              />
             ) : summaryData?.error ? (
               <div className="text-center py-8 text-gray-500">{summaryData.message || 'No data'}</div>
             ) : (
@@ -838,6 +877,7 @@ export default function JobLogs() {
               orderName={selectedOrder.order_name}
               startDate={selectedOrder.startDate}
               endDate={selectedOrder.endDate}
+              fclOrderRow={selectedReport === 'FCL' ? selectedOrder : null}
             />
           )}
         </div>
@@ -869,8 +909,13 @@ function formatFclTotalizerKg(value) {
   return formatReportKg(value);
 }
 
+function formatFclProducedKg(value) {
+  if (value == null || Number.isNaN(parseFloat(value))) return '—';
+  return formatReportKg(value);
+}
+
 // Get produced/consumed from summary for header (MILL-A vs FCL/SCL/FTRA)
-function getProducedConsumedFromSummary(summary, reportType) {
+function getProducedConsumedFromSummary(summary, reportType, fclOrderRow = null) {
   if (!summary || summary.error) return null;
   if (reportType === 'MILL-A') {
     const bt = summary.bran_receiver_totals || {};
@@ -886,16 +931,13 @@ function getProducedConsumedFromSummary(summary, reportType) {
     const senderTotal = Object.values(summary.per_bin_weight_totals || {}).reduce((s, w) => s + (parseFloat(w) || 0), 0);
     let receiverTotal = 0;
     if (reportType === 'FCL') {
-      // Produced = output-bin delta for the order window (matches analytics API / table intent).
-      // Do not add fcl_2_520we_weight — that is the raw cumulative PLC total, not job production.
-      receiverTotal = Number(
-        summary.total_produced_weight ?? summary.main_receiver_weight ?? 0
-      );
+      const { start, end } = mergeFclTotalizerSnapshot(summary, fclOrderRow);
+      const delta = fclProducedFromTotalizers(start, end);
       return {
-        produced: receiverTotal,
+        produced: delta,
         consumed: senderTotal,
-        fclStartTotalizer: summary.fcl_2_520we_at_order_start,
-        fclEndTotalizer: summary.fcl_2_520we_at_order_end,
+        fclStartTotalizer: start ?? null,
+        fclEndTotalizer: end ?? null,
       };
     }
     const rw = summary.receiver_weight || {};
@@ -906,14 +948,14 @@ function getProducedConsumedFromSummary(summary, reportType) {
 }
 
 // Print-only layout: same table design as NewReport.jsx (old layout)
-function JobLogsPrintLayout({ summary, reportType, orderName, startDate, endDate }) {
+function JobLogsPrintLayout({ summary, reportType, orderName, startDate, endDate, fclOrderRow = null }) {
   if (!summary || summary.error) return null;
   const removeUOM = (label) => (label ? label.replace(/\s*\(.*?\)\s*$/g, '').trim() : label);
   const formatDateRange = () => {
     if (!startDate || !endDate || isNaN(startDate.getTime()) || isNaN(endDate.getTime())) return '';
     return `(${startDate.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })} to ${endDate.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })})`;
   };
-  const metrics = getProducedConsumedFromSummary(summary, reportType);
+  const metrics = getProducedConsumedFromSummary(summary, reportType, fclOrderRow);
   const reportTitle = reportType === 'MILL-A' ? 'Mill-A' : reportType;
   const displayName = orderName ? String(orderName).replace(/MILA/gi, 'Mill-A') : reportTitle;
 
@@ -1082,8 +1124,13 @@ function JobLogsPrintLayout({ summary, reportType, orderName, startDate, endDate
   let receiverRows = [];
   if (reportType === 'FCL') {
     const rbid = receiver_bin_id ? String(receiver_bin_id).padStart(4, '0') : '0028';
+    let outputBinWeight = main_receiver_weight || 0;
+    if (metrics && Object.prototype.hasOwnProperty.call(metrics, 'produced')) {
+      if (metrics.produced === null) outputBinWeight = null;
+      else if (Number.isFinite(Number(metrics.produced))) outputBinWeight = Number(metrics.produced);
+    }
     receiverRows = [
-      { id: rbid, product: receiver_material_name || 'N/A', location: 'Output Bin', weight: main_receiver_weight || 0 },
+      { id: rbid, product: receiver_material_name || 'N/A', location: 'Output Bin', weight: outputBinWeight },
       { id: 'FCL_2_520WE', product: 'FCL 2_520WE', location: 'Cumulative', weight: fcl_2_520we_weight || 0 },
     ];
   } else {
@@ -1125,7 +1172,14 @@ function JobLogsPrintLayout({ summary, reportType, orderName, startDate, endDate
         </div>
         {metrics && (
           <div className="text-right">
-            <div className="font-semibold">Produced: <span>{Math.abs(Number(metrics.produced)).toFixed(1)} kg</span></div>
+            <div className="font-semibold">
+              Produced:{' '}
+              <span>
+                {reportType === 'FCL' && (metrics.produced == null || Number.isNaN(parseFloat(metrics.produced)))
+                  ? '—'
+                  : `${Math.abs(Number(metrics.produced)).toFixed(1)} kg`}
+              </span>
+            </div>
             {reportType === 'FCL' ? (
               <>
                 <div className="font-semibold">
@@ -1165,7 +1219,14 @@ function JobLogsPrintLayout({ summary, reportType, orderName, startDate, endDate
           <thead><tr className="bg-gray-100"><th className="border px-2 py-1">ID</th><th className="border px-2 py-1">Product</th><th className="border px-2 py-1">Location</th><th className="border px-2 py-1">Weight</th></tr></thead>
           <tbody>
             {receiverRows.map((row, i) => (
-              <tr key={i}><td className="border px-2 py-1">{row.id}</td><td className="border px-2 py-1">{row.product}</td><td className="border px-2 py-1">{row.location}</td><td className="border px-2 py-1 text-right">{Math.abs(parseFloat(row.weight)).toFixed(1)} kg</td></tr>
+              <tr key={i}>
+                <td className="border px-2 py-1">{row.id}</td>
+                <td className="border px-2 py-1">{row.product}</td>
+                <td className="border px-2 py-1">{row.location}</td>
+                <td className="border px-2 py-1 text-right">
+                  {row.weight === null ? '—' : `${Math.abs(parseFloat(row.weight)).toFixed(1)} kg`}
+                </td>
+              </tr>
             ))}
           </tbody>
         </table>
@@ -1339,7 +1400,7 @@ function MilaReportView({ summary, selectedOrderName }) {
 }
 
 // FCL/SCL/FTRA summary card report view (simplified; full version matches Orders SummaryCardLayout)
-function SummaryCardReportView({ summary, reportType, selectedOrderName }) {
+function SummaryCardReportView({ summary, reportType, selectedOrderName, fclOutputBinKg }) {
   if (!summary) return null;
   if (summary.error) {
     return (
@@ -1396,8 +1457,12 @@ function SummaryCardReportView({ summary, reportType, selectedOrderName }) {
   let receiverRows = [];
   if (reportType === 'FCL') {
     const rbid = receiver_bin_id ? String(receiver_bin_id).padStart(4, '0') : '0028';
+    let outputBinWeight = main_receiver_weight || 0;
+    if (fclOutputBinKg !== undefined) {
+      outputBinWeight = fclOutputBinKg === null ? null : Number(fclOutputBinKg);
+    }
     receiverRows = [
-      { id: rbid, product: receiver_material_name || 'N/A', location: 'Output Bin', weight: main_receiver_weight || 0 },
+      { id: rbid, product: receiver_material_name || 'N/A', location: 'Output Bin', weight: outputBinWeight },
       { id: 'FCL_2_520WE', product: 'FCL 2_520WE', location: 'Cumulative', weight: fcl_2_520we_weight || 0 },
     ];
   } else {
@@ -1408,7 +1473,10 @@ function SummaryCardReportView({ summary, reportType, selectedOrderName }) {
   }
 
   const senderTotal = senderRows.reduce((s, r) => s + r.weight, 0);
-  const receiverTotal = receiverRows.reduce((s, r) => s + r.weight, 0);
+  const receiverTotal = receiverRows.reduce(
+    (s, r) => s + (r.weight === null || r.weight === undefined || Number.isNaN(Number(r.weight)) ? 0 : Number(r.weight)),
+    0,
+  );
 
   const setpointsList = [];
   if (reportType === 'FTRA') {
@@ -1455,7 +1523,11 @@ function SummaryCardReportView({ summary, reportType, selectedOrderName }) {
             {receiverRows.map((row, i) => (
               <li key={i} className="flex justify-between">
                 <span>{row.id} {row.product} {row.location ? `(${row.location})` : ''}</span>
-                <span>{Number(row.weight).toFixed(1)} kg</span>
+                <span>
+                  {row.weight === null || row.weight === undefined || Number.isNaN(Number(row.weight))
+                    ? '—'
+                    : `${Number(row.weight).toFixed(1)} kg`}
+                </span>
               </li>
             ))}
             {receiverRows.length === 0 && <li className="text-gray-500">—</li>}

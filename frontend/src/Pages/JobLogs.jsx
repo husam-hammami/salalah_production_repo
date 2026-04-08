@@ -186,18 +186,20 @@ function buildFclReceiverDetailRows({
       weight: outputBinKg,
     },
     {
-      id: 'FCL_2_520WE',
-      product: 'Start totalizer',
-      location: 'FCL 2_520WE (Cumulative)',
+      id: 'Start totalizer',
+      product: '',
+      location: '',
+      fclReceiverShortLabel: 'Start totalizer',
       weight:
         startTotalizerKg != null && startTotalizerKg !== '' && Number.isFinite(Number(startTotalizerKg))
           ? Number(startTotalizerKg)
           : null,
     },
     {
-      id: 'FCL_2_520WE',
-      product: 'End totalizer',
-      location: 'FCL 2_520WE (Cumulative)',
+      id: 'End totalizer',
+      product: '',
+      location: '',
+      fclReceiverShortLabel: 'End totalizer',
       weight:
         endTotalizerKg != null && endTotalizerKg !== '' && Number.isFinite(Number(endTotalizerKg))
           ? Number(endTotalizerKg)
@@ -797,8 +799,8 @@ export default function JobLogs() {
                     </td>
                     {selectedReport === 'FCL' ? (
                       <>
-                        <td className="px-3 py-2.5 text-center whitespace-nowrap" title="FCL_2_520WE at order start">{formatFclTotalizerKg(job.startTotalizer)}</td>
-                        <td className="px-3 py-2.5 text-center whitespace-nowrap" title="FCL_2_520WE at order end">{formatFclTotalizerKg(job.endTotalizer)}</td>
+                        <td className="px-3 py-2.5 text-center whitespace-nowrap" title="Start totalizer at order start">{formatFclTotalizerKg(job.startTotalizer)}</td>
+                        <td className="px-3 py-2.5 text-center whitespace-nowrap" title="End totalizer at order end">{formatFclTotalizerKg(job.endTotalizer)}</td>
                       </>
                     ) : (
                       <td className="px-3 py-2.5 text-center whitespace-nowrap">{formatReportKg(job.consumed)}</td>
@@ -966,8 +968,17 @@ function formatFclProducedKg(value) {
 
 function formatFclReceiverRowWeightKg(row) {
   if (row.weight === null || row.weight === undefined || Number.isNaN(Number(row.weight))) return '—';
-  if (row.product === 'Start totalizer' || row.product === 'End totalizer') return formatReportKg(row.weight);
+  if (row.fclReceiverShortLabel || row.id === 'Start totalizer' || row.id === 'End totalizer') {
+    return formatReportKg(row.weight);
+  }
   return `${Number(row.weight).toFixed(1)} kg`;
+}
+
+/** Single-line label for FCL receiver rows (card list) — totalizer rows: plain names only. */
+function formatFclReceiverCardLabel(row) {
+  if (row.fclReceiverShortLabel) return row.fclReceiverShortLabel;
+  const loc = row.location ? ` (${row.location})` : '';
+  return `${row.id} ${row.product || ''}${loc}`.replace(/\s+/g, ' ').trim();
 }
 
 // Get produced/consumed from summary for header (MILL-A vs FCL/SCL/FTRA)
@@ -1240,13 +1251,13 @@ function JobLogsPrintLayout({ summary, reportType, orderName, startDate, endDate
             {reportType === 'FCL' ? (
               <>
                 <div className="font-semibold">
-                  Start totalizer (FCL_2_520WE):{' '}
+                  Start totalizer:{' '}
                   {metrics.fclStartTotalizer != null && !Number.isNaN(parseFloat(metrics.fclStartTotalizer))
                     ? `${Math.abs(Number(metrics.fclStartTotalizer)).toFixed(1)} kg`
                     : '—'}
                 </div>
                 <div className="font-semibold">
-                  End totalizer (FCL_2_520WE):{' '}
+                  End totalizer:{' '}
                   {metrics.fclEndTotalizer != null && !Number.isNaN(parseFloat(metrics.fclEndTotalizer))
                     ? `${Math.abs(Number(metrics.fclEndTotalizer)).toFixed(1)} kg`
                     : '—'}
@@ -1277,12 +1288,21 @@ function JobLogsPrintLayout({ summary, reportType, orderName, startDate, endDate
           <tbody>
             {receiverRows.map((row, i) => (
               <tr key={i}>
-                <td className="border px-2 py-1">{row.id}</td>
-                <td className="border px-2 py-1">{row.product}</td>
-                <td className="border px-2 py-1">{row.location}</td>
-                <td className="border px-2 py-1 text-right">
-                  {reportType === 'FCL' ? formatFclReceiverRowWeightKg(row) : (row.weight === null ? '—' : `${Math.abs(parseFloat(row.weight)).toFixed(1)} kg`)}
-                </td>
+                {reportType === 'FCL' && row.fclReceiverShortLabel ? (
+                  <>
+                    <td className="border px-2 py-1" colSpan={3}>{row.fclReceiverShortLabel}</td>
+                    <td className="border px-2 py-1 text-right">{formatFclReceiverRowWeightKg(row)}</td>
+                  </>
+                ) : (
+                  <>
+                    <td className="border px-2 py-1">{row.id}</td>
+                    <td className="border px-2 py-1">{row.product}</td>
+                    <td className="border px-2 py-1">{row.location}</td>
+                    <td className="border px-2 py-1 text-right">
+                      {reportType === 'FCL' ? formatFclReceiverRowWeightKg(row) : (row.weight === null ? '—' : `${Math.abs(parseFloat(row.weight)).toFixed(1)} kg`)}
+                    </td>
+                  </>
+                )}
               </tr>
             ))}
           </tbody>
@@ -1589,7 +1609,7 @@ function SummaryCardReportView({
           <ul className="space-y-1">
             {receiverRows.map((row, i) => (
               <li key={i} className="flex justify-between">
-                <span>{row.id} {row.product} {row.location ? `(${row.location})` : ''}</span>
+                <span>{reportType === 'FCL' ? formatFclReceiverCardLabel(row) : `${row.id} ${row.product} ${row.location ? `(${row.location})` : ''}`}</span>
                 <span>
                   {reportType === 'FCL' ? formatFclReceiverRowWeightKg(row) : (
                     row.weight === null || row.weight === undefined || Number.isNaN(Number(row.weight))

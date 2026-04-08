@@ -4135,6 +4135,19 @@ def _run_fcl_summary(start_dubai, end_dubai, order_name, start_with_buffer, end_
     
     logger.info(f"[FCL Summary] Receiver: bin {receiver_bin_id}, material: {receiver_material_name}")
 
+    tw_starts = [
+        float(r["fcl_2_520we_at_order_start"])
+        for r in rows
+        if r.get("fcl_2_520we_at_order_start") is not None
+    ]
+    tw_ends = [
+        float(r["fcl_2_520we_at_order_end"])
+        for r in rows
+        if r.get("fcl_2_520we_at_order_end") is not None
+    ]
+    fcl_520we_snap_start = round(min(tw_starts), 3) if tw_starts else None
+    fcl_520we_snap_end = round(max(tw_ends), 3) if tw_ends else None
+
     # Prepare summary output
     summary = {
         "record_count": record_count,
@@ -4155,7 +4168,9 @@ def _run_fcl_summary(start_dubai, end_dubai, order_name, start_with_buffer, end_
         "second_receiver_id": "FCL_2_520WE",  # Second row ID
         "second_receiver_material": "FCL 2_520WE", # Second row name
         "start_time": min([r.get("order_start_time") for r in rows if r.get("order_start_time")], default=first_record.get("created_at")),
-        "end_time": max([r.get("order_end_time") for r in rows if r.get("order_end_time")], default=last_record.get("created_at"))
+        "end_time": max([r.get("order_end_time") for r in rows if r.get("order_end_time")], default=last_record.get("created_at")),
+        "fcl_2_520we_at_order_start": fcl_520we_snap_start,
+        "fcl_2_520we_at_order_end": fcl_520we_snap_end,
     }
     
     # ✅ Log final summary for debugging

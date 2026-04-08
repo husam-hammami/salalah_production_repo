@@ -1276,7 +1276,9 @@ def archive_old_logs():
                             per_bin_weights JSONB,
                             created_at TIMESTAMP,
                             order_start_time TIMESTAMP,
-                            order_end_time TIMESTAMP
+                            order_end_time TIMESTAMP,
+                            fcl_2_520we_at_order_start NUMERIC,
+                            fcl_2_520we_at_order_end NUMERIC
                         );
                     """)
 
@@ -1362,18 +1364,32 @@ def archive_old_logs():
                         archive_order_start = min(start_times) if start_times else None
                         archive_order_end = max(end_times) if end_times else None
 
-                        logger.info(f"📦 [FCL Archive] Group '{actual_order_name}': {len(group_rows)} rows | Senders: {total_bin_weight_kg:.1f} kg | Receiver: {receiver_cumulative_kg:.1f} kg | Water: {water_cumulative_liters:.1f} L | Total: {produced_weight:.1f} kg | FCL_2_520WE: {fcl_2_520we_last:.0f} kg")
+                        tw_starts = [
+                            float(r["fcl_2_520we_at_order_start"])
+                            for r in group_rows
+                            if r.get("fcl_2_520we_at_order_start") is not None
+                        ]
+                        tw_ends = [
+                            float(r["fcl_2_520we_at_order_end"])
+                            for r in group_rows
+                            if r.get("fcl_2_520we_at_order_end") is not None
+                        ]
+                        arch_tw_start = round(min(tw_starts), 3) if tw_starts else None
+                        arch_tw_end = round(max(tw_ends), 3) if tw_ends else None
+
+                        logger.info(f"📦 [FCL Archive] Group '{actual_order_name}': {len(group_rows)} rows | Senders: {total_bin_weight_kg:.1f} kg | Receiver: {receiver_cumulative_kg:.1f} kg | Water: {water_cumulative_liters:.1f} L | Total: {produced_weight:.1f} kg | FCL_2_520WE: {fcl_2_520we_last:.0f} kg | 520WE snap: {arch_tw_start} → {arch_tw_end}")
 
                         cur.execute("""
                             INSERT INTO fcl_monitor_logs_archive (
                                 job_status, line_running, receiver, fcl_receivers, flow_rate, produced_weight,
                                 water_consumed, moisture_offset, moisture_setpoint, cleaning_scale_bypass,
                                 active_sources, active_destination, order_name,
-                                per_bin_weights, created_at, order_start_time, order_end_time
+                                per_bin_weights, created_at, order_start_time, order_end_time,
+                                fcl_2_520we_at_order_start, fcl_2_520we_at_order_end
                             )
                             VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s,
                                     %s::jsonb, %s::jsonb, %s,
-                                    %s::jsonb, %s, %s, %s)
+                                    %s::jsonb, %s, %s, %s, %s, %s)
                         """, (
                             latest['job_status'],
                             latest['line_running'],
@@ -1392,6 +1408,8 @@ def archive_old_logs():
                             archive_time,
                             archive_order_start,
                             archive_order_end,
+                            arch_tw_start,
+                            arch_tw_end,
                         ))
 
                     # Delete all archived live rows after all groups inserted
@@ -2426,16 +2444,41 @@ def _now_dubai_naive():
     return datetime.datetime.now(pytz.utc).astimezone(_DUBAI_TZ).replace(tzinfo=None)
 
 
+def _fcl_520we_totalizer_kg(receivers):
+    """Read FCL_2_520WE cumulative kg from fcl_receivers list (or JSON string)."""
+    if receivers is None:
+        return None
+    if isinstance(receivers, str):
+        try:
+            receivers = json.loads(receivers or "[]")
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if not isinstance(receivers, list):
+        return None
+    for r in receivers:
+        rid = str(r.get("id") or "")
+        if rid == "FCL_2_520WE" or "520WE" in rid:
+            try:
+                v = float(r.get("weight", 0) or 0)
+                return v
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 monitor_running = False
 fcl_order_counter = 1
 fcl_current_order_name = None
 fcl_session_started = None
 fcl_session_ended = None
 fcl_last_job_status = None
+fcl_520we_at_order_start = None
+fcl_520we_at_order_end = None
 
 def fcl_realtime_monitor():
     global monitor_running, fcl_order_counter
     global fcl_current_order_name, fcl_session_started, fcl_session_ended, fcl_last_job_status
+    global fcl_520we_at_order_start, fcl_520we_at_order_end
 
     monitor_running = True
     
@@ -2474,29 +2517,35 @@ def fcl_realtime_monitor():
             # 🟢 Start/Create order when job_status == 1 (order_active)
             if job_status == 1:
                 if not fcl_current_order_name or not fcl_session_started:
+                    tw = _fcl_520we_totalizer_kg(fcl_receivers)
+                    fcl_520we_at_order_start = tw
+                    fcl_520we_at_order_end = None
                     fcl_session_started = now
                     fcl_session_ended = None
                     fcl_current_order_name = f"FCL{fcl_order_counter}"
                     fcl_order_counter += 1
-                    logger.info(f"🆕 FCL order started: {fcl_current_order_name} at {now} (job_status=1)")
+                    logger.info(f"🆕 FCL order started: {fcl_current_order_name} at {now} (job_status=1) FCL_2_520WE={tw}")
                 fcl_last_job_status = 1
 
             # 🔴 End current order when job_status == 0 (order_done) - defer clearing until after INSERT
             elif job_status == 0:
                 if fcl_current_order_name:
+                    fcl_520we_at_order_end = _fcl_520we_totalizer_kg(fcl_receivers)
                     fcl_session_ended = now
-                    logger.info(f"✅ FCL order done: {fcl_current_order_name} at {now} (job_status=0) - will clear after insert")
+                    logger.info(f"✅ FCL order done: {fcl_current_order_name} at {now} (job_status=0) FCL_2_520WE end={fcl_520we_at_order_end} - will clear after insert")
                     fcl_order_ending = True
                 fcl_last_job_status = 0
 
             # ✅ Order name creation (only when line is running)
             if line_running:
-                # Ensure we have an order name
                 if not fcl_current_order_name or not fcl_session_started:
+                    tw = _fcl_520we_totalizer_kg(fcl_receivers)
+                    fcl_520we_at_order_start = tw
+                    fcl_520we_at_order_end = None
                     fcl_current_order_name = f"FCL{fcl_order_counter}"
                     fcl_order_counter += 1
                     fcl_session_started = now
-                    logger.warning(f"⚠️ FCL line_running=true but no order. Creating: {fcl_current_order_name}")
+                    logger.warning(f"⚠️ FCL line_running=true but no order. Creating: {fcl_current_order_name} FCL_2_520WE={tw}")
 
             # ✅ ALWAYS store data (regardless of line_running) to track FCL_2_520WE continuously
             # Use the enriched sources data (already includes weight and material info)
@@ -2557,14 +2606,17 @@ def fcl_realtime_monitor():
                         );
                     """)
 
+                    tw_snap_s = fcl_520we_at_order_start if fcl_current_order_name else None
+                    tw_snap_e = fcl_520we_at_order_end if fcl_current_order_name else None
                     cursor.execute("""
                         INSERT INTO fcl_monitor_logs (
                             job_status, line_running, receiver, fcl_receivers, flow_rate, produced_weight,
                             water_consumed, moisture_offset, moisture_setpoint, cleaning_scale_bypass,
                             active_sources, active_destination, order_name, created_at,
-                            order_start_time, order_end_time
+                            order_start_time, order_end_time,
+                            fcl_2_520we_at_order_start, fcl_2_520we_at_order_end
                         ) VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s,
-                                  %s::jsonb, %s::jsonb, %s, %s, %s, %s)
+                                  %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s)
                     """, (
                         job_status,
                         data.get("line_running"),
@@ -2582,6 +2634,8 @@ def fcl_realtime_monitor():
                         now,
                         fcl_session_started,
                         fcl_session_ended,
+                        tw_snap_s,
+                        tw_snap_e,
                     ))
                     conn.commit()
                     logger.info(f"✅ FCL log saved: {fcl_current_order_name or 'NO_ORDER'} | Job Status: {job_status} | Line Running: {line_running} | Sender: {total_sender_weight:.3f} t/h | Receiver: {receiver_weight:.3f} t/h | Produced: {produced_weight:.3f} t/h | Time: {now}")
@@ -2593,6 +2647,8 @@ def fcl_realtime_monitor():
                 fcl_current_order_name = None
                 fcl_session_started = None
                 fcl_session_ended = None
+                fcl_520we_at_order_start = None
+                fcl_520we_at_order_end = None
 
         except Exception as e:
             logger.error(f"❌ FCL monitor error: {e}", exc_info=True)

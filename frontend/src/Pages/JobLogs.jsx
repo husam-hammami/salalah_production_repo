@@ -94,6 +94,52 @@ function buildFclReceiverStrings(lastRow) {
   return { full, short: toShort(full) };
 }
 
+function fcl520weWeightKgFromReceivers(row) {
+  if (!row) return null;
+  let fcl = row.fcl_receivers;
+  if (typeof fcl === 'string') {
+    try { fcl = JSON.parse(fcl || '[]'); } catch { fcl = []; }
+  }
+  if (!Array.isArray(fcl)) return null;
+  for (const r of fcl) {
+    const id = String(r?.id ?? '');
+    if (id === 'FCL_2_520WE' || id.includes('520WE')) {
+      const w = typeof r?.weight_kg === 'number' ? r.weight_kg : parseFloat(r?.weight);
+      if (Number.isFinite(w)) return w;
+    }
+  }
+  return null;
+}
+
+/** PLC snapshot columns on archive rows, else first/last row fcl_receivers fallback. */
+function aggregateFclOrderTotalizers(rows) {
+  if (!rows?.length) return { startTotalizer: null, endTotalizer: null };
+  const twStarts = [];
+  const twEnds = [];
+  rows.forEach((row) => {
+    const s = row.fcl_2_520we_at_order_start;
+    const e = row.fcl_2_520we_at_order_end;
+    if (s != null && s !== '') {
+      const n = parseFloat(s);
+      if (Number.isFinite(n)) twStarts.push(n);
+    }
+    if (e != null && e !== '') {
+      const n = parseFloat(e);
+      if (Number.isFinite(n)) twEnds.push(n);
+    }
+  });
+  let startTotalizer = twStarts.length ? Math.min(...twStarts) : null;
+  let endTotalizer = twEnds.length ? Math.max(...twEnds) : null;
+  const sorted = [...rows].sort((a, b) => {
+    const ta = parseArchiveDate(a.created_at)?.getTime() ?? 0;
+    const tb = parseArchiveDate(b.created_at)?.getTime() ?? 0;
+    return ta - tb;
+  });
+  if (startTotalizer == null) startTotalizer = fcl520weWeightKgFromReceivers(sorted[0]);
+  if (endTotalizer == null) endTotalizer = fcl520weWeightKgFromReceivers(sorted[sorted.length - 1]);
+  return { startTotalizer, endTotalizer };
+}
+
 // Build material lookup from active_sources: bin_key -> material_name
 function getMaterialSummaryFromActiveSources(row) {
   let sources = row?.active_sources;
@@ -330,8 +376,11 @@ function buildJobList(archiveData, reportType) {
       if (reportType === 'FCL') {
         const rec = buildFclReceiverStrings(lastRow);
         const snd = buildFclSenderStrings(lastRow);
+        const { startTotalizer, endTotalizer } = aggregateFclOrderTotalizers(j.rows);
         return {
           ...base,
+          startTotalizer,
+          endTotalizer,
           receiverSummary: rec.short,
           senderSummary: snd.short,
           receiverFullText: rec.full,
@@ -623,7 +672,14 @@ export default function JobLogs() {
                   <th className="text-center px-3 py-2.5 border-b dark:border-zinc-600 font-semibold">{selectedReport === 'MILL-A' ? 'Bran Receiver' : 'Receiver'}</th>
                   <th className="text-center px-3 py-2.5 border-b dark:border-zinc-600 font-semibold">Sender</th>
                   <th className="text-center px-3 py-2.5 border-b dark:border-zinc-600 font-semibold">Produced</th>
-                  <th className="text-center px-3 py-2.5 border-b dark:border-zinc-600 font-semibold">Consumed</th>
+                  {selectedReport === 'FCL' ? (
+                    <>
+                      <th className="text-center px-3 py-2.5 border-b dark:border-zinc-600 font-semibold">Start totalizer</th>
+                      <th className="text-center px-3 py-2.5 border-b dark:border-zinc-600 font-semibold">End totalizer</th>
+                    </>
+                  ) : (
+                    <th className="text-center px-3 py-2.5 border-b dark:border-zinc-600 font-semibold">Consumed</th>
+                  )}
                 </tr>
               </thead>
               <tbody>
@@ -669,7 +725,14 @@ export default function JobLogs() {
                       {job.senderSummary || '—'}
                     </td>
                     <td className="px-3 py-2.5 text-center whitespace-nowrap">{formatReportKg(job.produced)}</td>
-                    <td className="px-3 py-2.5 text-center whitespace-nowrap">{formatReportKg(job.consumed)}</td>
+                    {selectedReport === 'FCL' ? (
+                      <>
+                        <td className="px-3 py-2.5 text-center whitespace-nowrap" title="FCL_2_520WE at order start">{formatFclTotalizerKg(job.startTotalizer)}</td>
+                        <td className="px-3 py-2.5 text-center whitespace-nowrap" title="FCL_2_520WE at order end">{formatFclTotalizerKg(job.endTotalizer)}</td>
+                      </>
+                    ) : (
+                      <td className="px-3 py-2.5 text-center whitespace-nowrap">{formatReportKg(job.consumed)}</td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -715,16 +778,34 @@ export default function JobLogs() {
                 {summaryData && !loadingSummary && (() => {
                   const metrics = getProducedConsumedFromSummary(summaryData, selectedReport);
                   if (!metrics) return null;
+                  if (selectedReport === 'FCL') {
+                    return (
+                      <>
+                        <div className="rounded-xl bg-gray-50 dark:bg-zinc-700/50 border border-gray-200 dark:border-zinc-600 px-4 py-3 text-center min-w-[120px]">
+                          <div className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-400 mb-0.5">Produced</div>
+                          <div className="text-xl md:text-2xl font-bold text-gray-900 dark:text-gray-100">{formatReportKg(metrics.produced)}</div>
+                        </div>
+                        <div className="rounded-xl bg-gray-50 dark:bg-zinc-700/50 border border-gray-200 dark:border-zinc-600 px-4 py-3 text-center min-w-[120px]">
+                          <div className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-400 mb-0.5">Start totalizer</div>
+                          <div className="text-xl md:text-2xl font-bold text-gray-900 dark:text-gray-100">{formatFclTotalizerKg(metrics.fclStartTotalizer)}</div>
+                        </div>
+                        <div className="rounded-xl bg-gray-50 dark:bg-zinc-700/50 border border-gray-200 dark:border-zinc-600 px-4 py-3 text-center min-w-[120px]">
+                          <div className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-400 mb-0.5">End totalizer</div>
+                          <div className="text-xl md:text-2xl font-bold text-gray-900 dark:text-gray-100">{formatFclTotalizerKg(metrics.fclEndTotalizer)}</div>
+                        </div>
+                      </>
+                    );
+                  }
                   return (
                     <>
-                    <div className="rounded-xl bg-gray-50 dark:bg-zinc-700/50 border border-gray-200 dark:border-zinc-600 px-4 py-3 text-center min-w-[120px]">
-                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-400 mb-0.5">Produced</div>
-                      <div className="text-xl md:text-2xl font-bold text-gray-900 dark:text-gray-100">{formatReportKg(metrics.produced)}</div>
-                    </div>
-                    <div className="rounded-xl bg-gray-50 dark:bg-zinc-700/50 border border-gray-200 dark:border-zinc-600 px-4 py-3 text-center min-w-[120px]">
-                      <div className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-400 mb-0.5">Consumed</div>
-                      <div className="text-xl md:text-2xl font-bold text-gray-900 dark:text-gray-100">{formatReportKg(metrics.consumed)}</div>
-                    </div>
+                      <div className="rounded-xl bg-gray-50 dark:bg-zinc-700/50 border border-gray-200 dark:border-zinc-600 px-4 py-3 text-center min-w-[120px]">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-400 mb-0.5">Produced</div>
+                        <div className="text-xl md:text-2xl font-bold text-gray-900 dark:text-gray-100">{formatReportKg(metrics.produced)}</div>
+                      </div>
+                      <div className="rounded-xl bg-gray-50 dark:bg-zinc-700/50 border border-gray-200 dark:border-zinc-600 px-4 py-3 text-center min-w-[120px]">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-400 mb-0.5">Consumed</div>
+                        <div className="text-xl md:text-2xl font-bold text-gray-900 dark:text-gray-100">{formatReportKg(metrics.consumed)}</div>
+                      </div>
                     </>
                   );
                 })()}
@@ -783,6 +864,11 @@ function formatReportKg(value) {
   return n.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' kg';
 }
 
+function formatFclTotalizerKg(value) {
+  if (value == null || Number.isNaN(parseFloat(value))) return '—';
+  return formatReportKg(value);
+}
+
 // Get produced/consumed from summary for header (MILL-A vs FCL/SCL/FTRA)
 function getProducedConsumedFromSummary(summary, reportType) {
   if (!summary || summary.error) return null;
@@ -800,11 +886,20 @@ function getProducedConsumedFromSummary(summary, reportType) {
     const senderTotal = Object.values(summary.per_bin_weight_totals || {}).reduce((s, w) => s + (parseFloat(w) || 0), 0);
     let receiverTotal = 0;
     if (reportType === 'FCL') {
-      receiverTotal = (summary.main_receiver_weight || 0) + (summary.fcl_2_520we_weight || 0);
-    } else {
-      const rw = summary.receiver_weight || {};
-      receiverTotal = Object.values(rw).reduce((s, w) => s + (parseFloat(w) || 0), 0) || (summary.main_receiver_weight || 0);
+      // Produced = output-bin delta for the order window (matches analytics API / table intent).
+      // Do not add fcl_2_520we_weight — that is the raw cumulative PLC total, not job production.
+      receiverTotal = Number(
+        summary.total_produced_weight ?? summary.main_receiver_weight ?? 0
+      );
+      return {
+        produced: receiverTotal,
+        consumed: senderTotal,
+        fclStartTotalizer: summary.fcl_2_520we_at_order_start,
+        fclEndTotalizer: summary.fcl_2_520we_at_order_end,
+      };
     }
+    const rw = summary.receiver_weight || {};
+    receiverTotal = Object.values(rw).reduce((s, w) => s + (parseFloat(w) || 0), 0) || (summary.main_receiver_weight || 0);
     return { produced: receiverTotal, consumed: senderTotal };
   }
   return null;
@@ -1031,7 +1126,24 @@ function JobLogsPrintLayout({ summary, reportType, orderName, startDate, endDate
         {metrics && (
           <div className="text-right">
             <div className="font-semibold">Produced: <span>{Math.abs(Number(metrics.produced)).toFixed(1)} kg</span></div>
-            <div className="font-semibold">Consumed: {Math.abs(Number(metrics.consumed)).toFixed(1)} kg</div>
+            {reportType === 'FCL' ? (
+              <>
+                <div className="font-semibold">
+                  Start totalizer (FCL_2_520WE):{' '}
+                  {metrics.fclStartTotalizer != null && !Number.isNaN(parseFloat(metrics.fclStartTotalizer))
+                    ? `${Math.abs(Number(metrics.fclStartTotalizer)).toFixed(1)} kg`
+                    : '—'}
+                </div>
+                <div className="font-semibold">
+                  End totalizer (FCL_2_520WE):{' '}
+                  {metrics.fclEndTotalizer != null && !Number.isNaN(parseFloat(metrics.fclEndTotalizer))
+                    ? `${Math.abs(Number(metrics.fclEndTotalizer)).toFixed(1)} kg`
+                    : '—'}
+                </div>
+              </>
+            ) : (
+              <div className="font-semibold">Consumed: {Math.abs(Number(metrics.consumed)).toFixed(1)} kg</div>
+            )}
           </div>
         )}
       </div>

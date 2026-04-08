@@ -4114,24 +4114,22 @@ def _run_fcl_summary(start_dubai, end_dubai, order_name, start_with_buffer, end_
             dest = json.loads(dest or "{}")
         
         if dest and isinstance(dest, dict):
-            # Update bin ID if present
-            if dest.get("bin_id"):
-                receiver_bin_id = dest.get("bin_id")
-            
-            # Try to get material name
+            bid = dest.get("bin_id")
             mat_name = None
             if dest.get("material") and isinstance(dest.get("material"), dict):
                 mat_name = dest["material"].get("material_name")
             elif dest.get("prd_name"):
                 mat_name = dest.get("prd_name")
-            
-            if mat_name and mat_name != "N/A":
-                receiver_material_name = mat_name
-                # Keep searching in case there's a better one later, or break? 
-                # Usually safe to keep the last non-N/A value found, or first.
-                # Let's break once we find a valid DB-enriched name.
-                if dest.get("material"): 
-                    break
+            # bin_id 0 is falsy in Python — handle explicitly so idle rows don't use `if bid:` only.
+            if bid is not None and bid > 0:
+                receiver_bin_id = bid
+                if mat_name and mat_name != "N/A":
+                    receiver_material_name = mat_name
+                    if dest.get("material"):
+                        break
+            elif bid == 0 and receiver_bin_id is None:
+                receiver_bin_id = 0
+                receiver_material_name = None
     
     logger.info(f"[FCL Summary] Receiver: bin {receiver_bin_id}, material: {receiver_material_name}")
 
@@ -4163,10 +4161,8 @@ def _run_fcl_summary(start_dubai, end_dubai, order_name, start_with_buffer, end_
         "fcl_2_520we_last_value": round(cumulative_counter_last, 3), 
         "per_bin_weight_totals": per_bin_weight_totals,
         "material_summary": material_summary,
-        "receiver_bin_id": "FCL_2_520WE",  # First row ID
-        "receiver_material_name": "Cumulative Counter",  # First row name  
-        "second_receiver_id": "FCL_2_520WE",  # Second row ID
-        "second_receiver_material": "FCL 2_520WE", # Second row name
+        "receiver_bin_id": receiver_bin_id,
+        "receiver_material_name": receiver_material_name,
         "start_time": min([r.get("order_start_time") for r in rows if r.get("order_start_time")], default=first_record.get("created_at")),
         "end_time": max([r.get("order_end_time") for r in rows if r.get("order_end_time")], default=last_record.get("created_at")),
         "fcl_2_520we_at_order_start": fcl_520we_snap_start,

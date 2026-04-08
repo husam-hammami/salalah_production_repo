@@ -159,6 +159,53 @@ function mergeFclTotalizerSnapshot(summary, fclOrderRow) {
   return { start: s, end: e };
 }
 
+function fclOutputBinLocationLabel(binId) {
+  const n = Number(binId);
+  if (!Number.isFinite(n) || n <= 0) return 'Output Bin';
+  return `Bin ${Math.trunc(n)}`;
+}
+
+function fclDisplayReceiverRowId(binId) {
+  const n = Number(binId);
+  if (!Number.isFinite(n) || n <= 0) return '0000';
+  return String(Math.trunc(n)).padStart(4, '0');
+}
+
+function buildFclReceiverDetailRows({
+  receiverBinId,
+  receiverMaterialName,
+  outputBinKg,
+  startTotalizerKg,
+  endTotalizerKg,
+}) {
+  return [
+    {
+      id: fclDisplayReceiverRowId(receiverBinId),
+      product: receiverMaterialName || 'N/A',
+      location: fclOutputBinLocationLabel(receiverBinId),
+      weight: outputBinKg,
+    },
+    {
+      id: 'FCL_2_520WE',
+      product: 'Start totalizer',
+      location: 'FCL 2_520WE (Cumulative)',
+      weight:
+        startTotalizerKg != null && startTotalizerKg !== '' && Number.isFinite(Number(startTotalizerKg))
+          ? Number(startTotalizerKg)
+          : null,
+    },
+    {
+      id: 'FCL_2_520WE',
+      product: 'End totalizer',
+      location: 'FCL 2_520WE (Cumulative)',
+      weight:
+        endTotalizerKg != null && endTotalizerKg !== '' && Number.isFinite(Number(endTotalizerKg))
+          ? Number(endTotalizerKg)
+          : null,
+    },
+  ];
+}
+
 // Build material lookup from active_sources: bin_key -> material_name
 function getMaterialSummaryFromActiveSources(row) {
   let sources = row?.active_sources;
@@ -850,19 +897,22 @@ export default function JobLogs() {
             ) : summaryData && selectedReport === 'MILL-A' ? (
               <MilaReportView summary={summaryData} selectedOrderName={selectedOrder.order_name} />
             ) : summaryData && (selectedReport === 'FCL' || selectedReport === 'SCL' || selectedReport === 'FTRA') ? (
-              <SummaryCardReportView
-                summary={summaryData}
-                reportType={selectedReport}
-                selectedOrderName={selectedOrder.order_name}
-                fclOutputBinKg={
+              (() => {
+                const fclMetrics =
                   selectedReport === 'FCL'
-                    ? (() => {
-                        const m = getProducedConsumedFromSummary(summaryData, 'FCL', selectedOrder);
-                        return m ? m.produced : undefined;
-                      })()
-                    : undefined
-                }
-              />
+                    ? getProducedConsumedFromSummary(summaryData, 'FCL', selectedOrder)
+                    : null;
+                return (
+                  <SummaryCardReportView
+                    summary={summaryData}
+                    reportType={selectedReport}
+                    selectedOrderName={selectedOrder.order_name}
+                    fclOutputBinKg={fclMetrics ? fclMetrics.produced : undefined}
+                    fclStartTotalizer={fclMetrics ? fclMetrics.fclStartTotalizer : undefined}
+                    fclEndTotalizer={fclMetrics ? fclMetrics.fclEndTotalizer : undefined}
+                  />
+                );
+              })()
             ) : summaryData?.error ? (
               <div className="text-center py-8 text-gray-500">{summaryData.message || 'No data'}</div>
             ) : (
@@ -912,6 +962,12 @@ function formatFclTotalizerKg(value) {
 function formatFclProducedKg(value) {
   if (value == null || Number.isNaN(parseFloat(value))) return '—';
   return formatReportKg(value);
+}
+
+function formatFclReceiverRowWeightKg(row) {
+  if (row.weight === null || row.weight === undefined || Number.isNaN(Number(row.weight))) return '—';
+  if (row.product === 'Start totalizer' || row.product === 'End totalizer') return formatReportKg(row.weight);
+  return `${Number(row.weight).toFixed(1)} kg`;
 }
 
 // Get produced/consumed from summary for header (MILL-A vs FCL/SCL/FTRA)
@@ -1097,7 +1153,6 @@ function JobLogsPrintLayout({ summary, reportType, orderName, startDate, endDate
     receiver_bin_id = null,
     receiver_material_name = null,
     main_receiver_weight = 0,
-    fcl_2_520we_weight = 0,
     record_count = 0,
     average_flow_rate = 0,
     average_moisture_setpoint = 0,
@@ -1123,16 +1178,18 @@ function JobLogsPrintLayout({ summary, reportType, orderName, startDate, endDate
     });
   let receiverRows = [];
   if (reportType === 'FCL') {
-    const rbid = receiver_bin_id ? String(receiver_bin_id).padStart(4, '0') : '0028';
     let outputBinWeight = main_receiver_weight || 0;
     if (metrics && Object.prototype.hasOwnProperty.call(metrics, 'produced')) {
       if (metrics.produced === null) outputBinWeight = null;
       else if (Number.isFinite(Number(metrics.produced))) outputBinWeight = Number(metrics.produced);
     }
-    receiverRows = [
-      { id: rbid, product: receiver_material_name || 'N/A', location: 'Output Bin', weight: outputBinWeight },
-      { id: 'FCL_2_520WE', product: 'FCL 2_520WE', location: 'Cumulative', weight: fcl_2_520we_weight || 0 },
-    ];
+    receiverRows = buildFclReceiverDetailRows({
+      receiverBinId: receiver_bin_id,
+      receiverMaterialName: receiver_material_name,
+      outputBinKg: outputBinWeight,
+      startTotalizerKg: metrics?.fclStartTotalizer,
+      endTotalizerKg: metrics?.fclEndTotalizer,
+    });
   } else {
     const rbid = receiver_bin_id ? String(receiver_bin_id).padStart(4, '0') : '0000';
     receiverRows = Object.entries(receiver_weight || {}).length > 0
@@ -1224,7 +1281,7 @@ function JobLogsPrintLayout({ summary, reportType, orderName, startDate, endDate
                 <td className="border px-2 py-1">{row.product}</td>
                 <td className="border px-2 py-1">{row.location}</td>
                 <td className="border px-2 py-1 text-right">
-                  {row.weight === null ? '—' : `${Math.abs(parseFloat(row.weight)).toFixed(1)} kg`}
+                  {reportType === 'FCL' ? formatFclReceiverRowWeightKg(row) : (row.weight === null ? '—' : `${Math.abs(parseFloat(row.weight)).toFixed(1)} kg`)}
                 </td>
               </tr>
             ))}
@@ -1400,7 +1457,14 @@ function MilaReportView({ summary, selectedOrderName }) {
 }
 
 // FCL/SCL/FTRA summary card report view (simplified; full version matches Orders SummaryCardLayout)
-function SummaryCardReportView({ summary, reportType, selectedOrderName, fclOutputBinKg }) {
+function SummaryCardReportView({
+  summary,
+  reportType,
+  selectedOrderName,
+  fclOutputBinKg,
+  fclStartTotalizer,
+  fclEndTotalizer,
+}) {
   if (!summary) return null;
   if (summary.error) {
     return (
@@ -1417,7 +1481,6 @@ function SummaryCardReportView({ summary, reportType, selectedOrderName, fclOutp
     receiver_bin_id = null,
     receiver_material_name = null,
     main_receiver_weight = 0,
-    fcl_2_520we_weight = 0,
     record_count = 0,
     average_flow_rate = 0,
     average_moisture_setpoint = 0,
@@ -1456,15 +1519,19 @@ function SummaryCardReportView({ summary, reportType, selectedOrderName, fclOutp
 
   let receiverRows = [];
   if (reportType === 'FCL') {
-    const rbid = receiver_bin_id ? String(receiver_bin_id).padStart(4, '0') : '0028';
     let outputBinWeight = main_receiver_weight || 0;
     if (fclOutputBinKg !== undefined) {
       outputBinWeight = fclOutputBinKg === null ? null : Number(fclOutputBinKg);
     }
-    receiverRows = [
-      { id: rbid, product: receiver_material_name || 'N/A', location: 'Output Bin', weight: outputBinWeight },
-      { id: 'FCL_2_520WE', product: 'FCL 2_520WE', location: 'Cumulative', weight: fcl_2_520we_weight || 0 },
-    ];
+    const startTz = fclStartTotalizer !== undefined ? fclStartTotalizer : summary.fcl_2_520we_at_order_start;
+    const endTz = fclEndTotalizer !== undefined ? fclEndTotalizer : summary.fcl_2_520we_at_order_end;
+    receiverRows = buildFclReceiverDetailRows({
+      receiverBinId: receiver_bin_id,
+      receiverMaterialName: receiver_material_name,
+      outputBinKg: outputBinWeight,
+      startTotalizerKg: startTz,
+      endTotalizerKg: endTz,
+    });
   } else {
     const rbid = receiver_bin_id ? String(receiver_bin_id).padStart(4, '0') : '0000';
     receiverRows = Object.entries(receiver_weight || {}).length > 0
@@ -1524,9 +1591,11 @@ function SummaryCardReportView({ summary, reportType, selectedOrderName, fclOutp
               <li key={i} className="flex justify-between">
                 <span>{row.id} {row.product} {row.location ? `(${row.location})` : ''}</span>
                 <span>
-                  {row.weight === null || row.weight === undefined || Number.isNaN(Number(row.weight))
-                    ? '—'
-                    : `${Number(row.weight).toFixed(1)} kg`}
+                  {reportType === 'FCL' ? formatFclReceiverRowWeightKg(row) : (
+                    row.weight === null || row.weight === undefined || Number.isNaN(Number(row.weight))
+                      ? '—'
+                      : `${Number(row.weight).toFixed(1)} kg`
+                  )}
                 </span>
               </li>
             ))}

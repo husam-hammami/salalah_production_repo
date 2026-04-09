@@ -3051,6 +3051,31 @@ def get_latest_10_mila_archive():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+_MILA_B1_BRAN_KEYS = ("B1Scale (kg)", "B1Scale", "B1 Scale", "MILA_B1_scale (kg)")
+
+
+def _mila_b1_kg_from_bran_receiver(bran):
+    """Read B1 cumulative kg from archived bran_receiver JSON (fallback when snapshot columns missing)."""
+    if not bran:
+        return None
+    if isinstance(bran, str):
+        try:
+            bran = json.loads(bran or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if not isinstance(bran, dict):
+        return None
+    for key in _MILA_B1_BRAN_KEYS:
+        v = bran.get(key)
+        if v is not None and v != "":
+            try:
+                f = float(v)
+                return round(f, 3)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
 @orders_bp.route('/mila/archive/summary', methods=['GET'])
 def get_mila_archive_summary():
     """
@@ -3351,6 +3376,28 @@ def get_mila_archive_summary():
         real_start = min(all_start_times) if all_start_times else first_record.get("created_at")
         real_end = max(all_end_times) if all_end_times else last_record.get("created_at")
 
+        b1_starts_plc = []
+        b1_ends_plc = []
+        for r in all_rows:
+            s = r.get("mila_b1_scale_at_order_start")
+            e = r.get("mila_b1_scale_at_order_end")
+            if s is not None:
+                try:
+                    b1_starts_plc.append(float(s))
+                except (TypeError, ValueError):
+                    pass
+            if e is not None:
+                try:
+                    b1_ends_plc.append(float(e))
+                except (TypeError, ValueError):
+                    pass
+        mila_b1_snap_start = round(min(b1_starts_plc), 3) if b1_starts_plc else None
+        mila_b1_snap_end = round(max(b1_ends_plc), 3) if b1_ends_plc else None
+        if mila_b1_snap_start is None:
+            mila_b1_snap_start = _mila_b1_kg_from_bran_receiver(first_record.get("bran_receiver"))
+        if mila_b1_snap_end is None:
+            mila_b1_snap_end = _mila_b1_kg_from_bran_receiver(last_record.get("bran_receiver"))
+
         summary_response = {
             "record_count": record_count,
             "total_produced_weight": round(total_produced_weight, 3),
@@ -3361,6 +3408,8 @@ def get_mila_archive_summary():
                 "receiver_weight_totals": receiver_weight_totals,
             "start_time": real_start,
             "end_time": real_end,
+            "mila_b1_scale_at_order_start": mila_b1_snap_start,
+            "mila_b1_scale_at_order_end": mila_b1_snap_end,
         }
         
         logger.info(f"📊 [MIL-A Summary] Sending bran_receiver_totals: {bran_receiver_totals}")

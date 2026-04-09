@@ -307,6 +307,52 @@ function buildFtraSenderStrings(lastRow) {
   return buildSclSenderStrings(lastRow);
 }
 
+const MILA_B1_SCALE_JSON_KEYS = ['B1Scale (kg)', 'B1Scale', 'B1 Scale', 'MILA_B1_scale (kg)'];
+
+function getB1ScaleKgFromBran(bran) {
+  let obj = bran;
+  if (typeof obj === 'string') {
+    try { obj = JSON.parse(obj || '{}'); } catch { obj = {}; }
+  }
+  if (!obj || typeof obj !== 'object') return null;
+  for (const key of MILA_B1_SCALE_JSON_KEYS) {
+    if (obj[key] != null && obj[key] !== '') {
+      const v = parseFloat(obj[key]);
+      if (Number.isFinite(v)) return v;
+    }
+  }
+  return null;
+}
+
+/** B1 totalizer: PLC snapshot columns (min/max) when present; else first/last row bran_receiver (like FCL 520WE). */
+function aggregateMilaB1ScaleSnapshot(rows) {
+  if (!rows?.length) return { b1ScaleStart: null, b1ScaleEnd: null };
+  const twStarts = [];
+  const twEnds = [];
+  rows.forEach((row) => {
+    const s = row.mila_b1_scale_at_order_start;
+    const e = row.mila_b1_scale_at_order_end;
+    if (s != null && s !== '') {
+      const n = parseFloat(s);
+      if (Number.isFinite(n)) twStarts.push(n);
+    }
+    if (e != null && e !== '') {
+      const n = parseFloat(e);
+      if (Number.isFinite(n)) twEnds.push(n);
+    }
+  });
+  let b1ScaleStart = twStarts.length ? Math.min(...twStarts) : null;
+  let b1ScaleEnd = twEnds.length ? Math.max(...twEnds) : null;
+  const sorted = [...rows].sort((a, b) => {
+    const ta = parseArchiveDate(a.created_at)?.getTime() ?? 0;
+    const tb = parseArchiveDate(b.created_at)?.getTime() ?? 0;
+    return ta - tb;
+  });
+  if (b1ScaleStart == null) b1ScaleStart = getB1ScaleKgFromBran(sorted[0]?.bran_receiver);
+  if (b1ScaleEnd == null) b1ScaleEnd = getB1ScaleKgFromBran(sorted[sorted.length - 1]?.bran_receiver);
+  return { b1ScaleStart, b1ScaleEnd };
+}
+
 // Get produced and consumed from archive rows for table columns (all report types)
 function getProducedConsumedFromRows(rows, reportType) {
   if (!rows || !Array.isArray(rows) || rows.length === 0) return { produced: 0, consumed: 0 };
@@ -341,7 +387,7 @@ function getProducedConsumedFromRows(rows, reportType) {
       ['9105 Bran fine (kg)', '9105 Bran fine', 'Bran fine'],
       ['9106 Bran coarse (kg)', '9106 Bran coarse', 'Bran coarse'],
     ];
-    const consumedKeys = ['B1Scale (kg)', 'B1Scale', 'B1 Scale', 'MILA_B1_scale (kg)'];
+    const consumedKeys = MILA_B1_SCALE_JSON_KEYS;
     let produced = 0;
     let consumed = 0;
     if (isSingle) {
@@ -433,8 +479,11 @@ function buildJobList(archiveData, reportType) {
       };
       if (reportType === 'MILL-A') {
         const { full, short } = buildMilaReceiverStrings(lastRow);
+        const { b1ScaleStart, b1ScaleEnd } = aggregateMilaB1ScaleSnapshot(j.rows);
         return {
           ...base,
+          b1ScaleStart,
+          b1ScaleEnd,
           receiverSummary: short,
           senderSummary: short,
           receiverFullText: full,
@@ -741,11 +790,18 @@ export default function JobLogs() {
                   <th className="text-center px-3 py-2.5 border-b dark:border-zinc-600 font-semibold">End Date</th>
                   <th className="text-center px-3 py-2.5 border-b dark:border-zinc-600 font-semibold">{selectedReport === 'MILL-A' ? 'Bran Receiver' : 'Receiver'}</th>
                   <th className="text-center px-3 py-2.5 border-b dark:border-zinc-600 font-semibold">Sender</th>
-                  <th className="text-center px-3 py-2.5 border-b dark:border-zinc-600 font-semibold">Produced</th>
+                  {selectedReport !== 'MILL-A' && (
+                    <th className="text-center px-3 py-2.5 border-b dark:border-zinc-600 font-semibold">Produced</th>
+                  )}
                   {selectedReport === 'FCL' ? (
                     <>
                       <th className="text-center px-3 py-2.5 border-b dark:border-zinc-600 font-semibold">Start totalizer</th>
                       <th className="text-center px-3 py-2.5 border-b dark:border-zinc-600 font-semibold">End totalizer</th>
+                    </>
+                  ) : selectedReport === 'MILL-A' ? (
+                    <>
+                      <th className="text-center px-3 py-2.5 border-b dark:border-zinc-600 font-semibold">B1 scale start</th>
+                      <th className="text-center px-3 py-2.5 border-b dark:border-zinc-600 font-semibold">B1 scale end</th>
                     </>
                   ) : (
                     <th className="text-center px-3 py-2.5 border-b dark:border-zinc-600 font-semibold">Consumed</th>
@@ -794,13 +850,20 @@ export default function JobLogs() {
                     >
                       {job.senderSummary || '—'}
                     </td>
-                    <td className="px-3 py-2.5 text-center whitespace-nowrap">
-                      {selectedReport === 'FCL' ? formatFclProducedKg(job.produced) : formatReportKg(job.produced)}
-                    </td>
+                    {selectedReport !== 'MILL-A' && (
+                      <td className="px-3 py-2.5 text-center whitespace-nowrap">
+                        {selectedReport === 'FCL' ? formatFclProducedKg(job.produced) : formatReportKg(job.produced)}
+                      </td>
+                    )}
                     {selectedReport === 'FCL' ? (
                       <>
                         <td className="px-3 py-2.5 text-center whitespace-nowrap" title="Start totalizer at order start">{formatFclTotalizerKg(job.startTotalizer)}</td>
                         <td className="px-3 py-2.5 text-center whitespace-nowrap" title="End totalizer at order end">{formatFclTotalizerKg(job.endTotalizer)}</td>
+                      </>
+                    ) : selectedReport === 'MILL-A' ? (
+                      <>
+                        <td className="px-3 py-2.5 text-center whitespace-nowrap" title="B1 at order start (PLC snapshot min across rows, else first row bran_receiver)">{formatFclTotalizerKg(job.b1ScaleStart)}</td>
+                        <td className="px-3 py-2.5 text-center whitespace-nowrap" title="B1 at order end (PLC snapshot max across rows, else last row bran_receiver)">{formatFclTotalizerKg(job.b1ScaleEnd)}</td>
                       </>
                     ) : (
                       <td className="px-3 py-2.5 text-center whitespace-nowrap">{formatReportKg(job.consumed)}</td>

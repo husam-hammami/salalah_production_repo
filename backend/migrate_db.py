@@ -72,6 +72,16 @@ MIGRATIONS = [
             "ALTER TABLE fcl_monitor_logs_archive ADD COLUMN IF NOT EXISTS fcl_2_520we_at_order_end NUMERIC",
         ],
     },
+    {
+        "id": "006_mila_b1_scale_snapshots",
+        "description": "MIL-A B1 scale cumulative kg at order start/end (mirrors FCL 520WE snapshots)",
+        "statements": [
+            "ALTER TABLE mila_monitor_logs ADD COLUMN IF NOT EXISTS mila_b1_scale_at_order_start NUMERIC",
+            "ALTER TABLE mila_monitor_logs ADD COLUMN IF NOT EXISTS mila_b1_scale_at_order_end NUMERIC",
+            "ALTER TABLE mila_monitor_logs_archive ADD COLUMN IF NOT EXISTS mila_b1_scale_at_order_start NUMERIC",
+            "ALTER TABLE mila_monitor_logs_archive ADD COLUMN IF NOT EXISTS mila_b1_scale_at_order_end NUMERIC",
+        ],
+    },
 ]
 
 

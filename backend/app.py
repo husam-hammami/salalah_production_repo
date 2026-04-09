@@ -1826,7 +1826,9 @@ def archive_mila_logs():
                             produced_weight NUMERIC,
                             created_at TIMESTAMP,
                             order_start_time TIMESTAMP,
-                            order_end_time TIMESTAMP
+                            order_end_time TIMESTAMP,
+                            mila_b1_scale_at_order_start NUMERIC,
+                            mila_b1_scale_at_order_end NUMERIC
                         );
                     """)
 
@@ -1982,15 +1984,29 @@ def archive_mila_logs():
                         archive_order_start = min(start_times) if start_times else None
                         archive_order_end = max(end_times) if end_times else None
 
+                        b1_starts = [
+                            float(r["mila_b1_scale_at_order_start"])
+                            for r in group_rows
+                            if r.get("mila_b1_scale_at_order_start") is not None
+                        ]
+                        b1_ends = [
+                            float(r["mila_b1_scale_at_order_end"])
+                            for r in group_rows
+                            if r.get("mila_b1_scale_at_order_end") is not None
+                        ]
+                        arch_b1_start = round(min(b1_starts), 3) if b1_starts else None
+                        arch_b1_end = round(max(b1_ends), 3) if b1_ends else None
+
                         cur.execute("""
                             INSERT INTO mila_monitor_logs_archive (
                                 order_name, status, receiver,
                                 bran_receiver, yield_log, setpoints_produced,
                                 produced_weight, created_at,
-                                order_start_time, order_end_time
+                                order_start_time, order_end_time,
+                                mila_b1_scale_at_order_start, mila_b1_scale_at_order_end
                             )
                             VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
-                                    %s::jsonb, %s, %s, %s, %s)
+                                    %s::jsonb, %s, %s, %s, %s, %s, %s)
                         """, (
                             actual_order_name,
                             last_row["status"],
@@ -2002,8 +2018,13 @@ def archive_mila_logs():
                             archive_cutoff,
                             archive_order_start,
                             archive_order_end,
+                            arch_b1_start,
+                            arch_b1_end,
                         ))
-                        logger.info(f"   📥 Archived {count} rows for order {actual_order_name} | start={archive_order_start} end={archive_order_end}")
+                        logger.info(
+                            f"   📥 Archived {count} rows for order {actual_order_name} | "
+                            f"start={archive_order_start} end={archive_order_end} | B1 snap {arch_b1_start} → {arch_b1_end}"
+                        )
 
                     # DELETE all archived live rows in one go
                     cur.execute("""
@@ -2167,12 +2188,32 @@ mila_order_counter = 1
 mila_current_order_name = None
 mila_session_started = None
 mila_session_ended = None
+mila_b1_scale_at_order_start = None
+mila_b1_scale_at_order_end = None
+
+
+def _mila_b1_scale_kg_from_api(bran_receiver_api):
+    """B1 cumulative kg from MILA monitor API bran_receiver (same source as B1Scale (kg) in DB)."""
+    if not bran_receiver_api or not isinstance(bran_receiver_api, dict):
+        return None
+    v = bran_receiver_api.get("b1")
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f:  # NaN
+        return None
+    return f
+
 
 def mila_realtime_monitor():
     import datetime
     import json
 
     global mila_order_counter, mila_current_order_name, mila_session_started, mila_session_ended
+    global mila_b1_scale_at_order_start, mila_b1_scale_at_order_end
 
     # Initialize counter from DB
     mila_order_counter = get_next_order_number("MILA", "mila_monitor_logs", "mila_monitor_logs_archive")
@@ -2316,17 +2357,26 @@ def mila_realtime_monitor():
             # 🟢 Start/Create order when job_status == 1 (order_active)
             if job_status == 1:
                 if not mila_current_order_name or not mila_session_started:
+                    b1_snap = _mila_b1_scale_kg_from_api(data.get("bran_receiver", {}))
+                    mila_b1_scale_at_order_start = b1_snap
+                    mila_b1_scale_at_order_end = None
                     mila_current_order_name = f"MILA{mila_order_counter}"
                     mila_order_counter += 1
                     mila_session_started = now
                     mila_session_ended = None
-                    logger.info(f"🆕 New MILA Order Started: {mila_current_order_name} at {now} (job_status=1)")
+                    logger.info(
+                        f"🆕 New MILA Order Started: {mila_current_order_name} at {now} (job_status=1) B1={b1_snap}"
+                    )
 
             # 🔴 End current order when job_status == 0 (order_done)
             elif job_status == 0:
                 if mila_current_order_name:
+                    mila_b1_scale_at_order_end = _mila_b1_scale_kg_from_api(data.get("bran_receiver", {}))
                     mila_session_ended = now
-                    logger.info(f"✅ MILA order done: {mila_current_order_name} at {now} (job_status=0) - waiting for next order")
+                    logger.info(
+                        f"✅ MILA order done: {mila_current_order_name} at {now} (job_status=0) "
+                        f"B1 end={mila_b1_scale_at_order_end} — will clear after insert"
+                    )
                     mila_order_ending = True
 
             # ✅ ALWAYS store data (regardless of line_running or job_status)
@@ -2393,14 +2443,17 @@ def mila_realtime_monitor():
 
             with get_db_connection() as conn:
                 cursor = conn.cursor()
+                b1_snap_s = mila_b1_scale_at_order_start if mila_current_order_name else None
+                b1_snap_e = mila_b1_scale_at_order_end if mila_current_order_name else None
                 cursor.execute("""
                     INSERT INTO mila_monitor_logs (
                         order_name, status, receiver,
                         bran_receiver, yield_log,
                         setpoints_produced, produced_weight, created_at,
-                        order_start_time, order_end_time
+                        order_start_time, order_end_time,
+                        mila_b1_scale_at_order_start, mila_b1_scale_at_order_end
                     ) VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
-                              %s::jsonb, %s, %s, %s, %s)
+                              %s::jsonb, %s, %s, %s, %s, %s, %s)
                 """, (
                     mila_current_order_name,
                     "running",
@@ -2412,6 +2465,8 @@ def mila_realtime_monitor():
                     now,
                     mila_session_started,
                     mila_session_ended,
+                    b1_snap_s,
+                    b1_snap_e,
                 ))
                 conn.commit()
                 logger.info(f"✅ MILA log saved: {mila_current_order_name} | Produced: {produced_weight} kg | Time: {now}")
@@ -2421,6 +2476,8 @@ def mila_realtime_monitor():
                 mila_current_order_name = None
                 mila_session_started = None
                 mila_session_ended = None
+                mila_b1_scale_at_order_start = None
+                mila_b1_scale_at_order_end = None
 
         except Exception as e:
             logger.error(f"❌ MILA monitor error: {e}", exc_info=True)
@@ -2431,6 +2488,7 @@ def mila_realtime_monitor():
         if sleep_time < 0.5:
             logger.warning(f"[MILA] Loop took {elapsed:.3f}s, only sleeping {sleep_time:.3f}s")
         gevent.sleep(sleep_time)
+
 
 import datetime
 import json

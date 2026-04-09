@@ -1828,7 +1828,9 @@ def archive_mila_logs():
                             order_start_time TIMESTAMP,
                             order_end_time TIMESTAMP,
                             mila_b1_scale_at_order_start NUMERIC,
-                            mila_b1_scale_at_order_end NUMERIC
+                            mila_b1_scale_at_order_end NUMERIC,
+                            mila_totalizers_at_order_start JSONB,
+                            mila_totalizers_at_order_end JSONB
                         );
                     """)
 
@@ -1997,16 +1999,22 @@ def archive_mila_logs():
                         arch_b1_start = round(min(b1_starts), 3) if b1_starts else None
                         arch_b1_end = round(max(b1_ends), 3) if b1_ends else None
 
+                        arch_tz_start = _merge_mila_totalizers_start_json(group_rows)
+                        arch_tz_end = _merge_mila_totalizers_end_json(group_rows)
+                        arch_tz_start_j = json.dumps(arch_tz_start) if arch_tz_start else None
+                        arch_tz_end_j = json.dumps(arch_tz_end) if arch_tz_end else None
+
                         cur.execute("""
                             INSERT INTO mila_monitor_logs_archive (
                                 order_name, status, receiver,
                                 bran_receiver, yield_log, setpoints_produced,
                                 produced_weight, created_at,
                                 order_start_time, order_end_time,
-                                mila_b1_scale_at_order_start, mila_b1_scale_at_order_end
+                                mila_b1_scale_at_order_start, mila_b1_scale_at_order_end,
+                                mila_totalizers_at_order_start, mila_totalizers_at_order_end
                             )
                             VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
-                                    %s::jsonb, %s, %s, %s, %s, %s, %s)
+                                    %s::jsonb, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
                         """, (
                             actual_order_name,
                             last_row["status"],
@@ -2020,6 +2028,8 @@ def archive_mila_logs():
                             archive_order_end,
                             arch_b1_start,
                             arch_b1_end,
+                            arch_tz_start_j,
+                            arch_tz_end_j,
                         ))
                         logger.info(
                             f"   📥 Archived {count} rows for order {actual_order_name} | "
@@ -2190,6 +2200,8 @@ mila_session_started = None
 mila_session_ended = None
 mila_b1_scale_at_order_start = None
 mila_b1_scale_at_order_end = None
+mila_totalizers_at_order_start = None
+mila_totalizers_at_order_end = None
 
 
 def _mila_b1_scale_kg_from_api(bran_receiver_api):
@@ -2208,12 +2220,91 @@ def _mila_b1_scale_kg_from_api(bran_receiver_api):
     return f
 
 
+def _mila_totalizers_dict_snapshot(bran_receiver_formatted):
+    """JSON-serializable copy of bran_receiver_formatted for order boundary snapshots."""
+    if not bran_receiver_formatted or not isinstance(bran_receiver_formatted, dict):
+        return None
+    out = {}
+    for k, v in bran_receiver_formatted.items():
+        if isinstance(v, bool):
+            out[k] = v
+        elif isinstance(v, (int, float)):
+            fv = float(v)
+            if fv == fv:
+                out[k] = round(fv, 6)
+        else:
+            try:
+                fv = float(v)
+                if fv == fv:
+                    out[k] = round(fv, 6)
+            except (TypeError, ValueError):
+                out[k] = v
+    return out if out else None
+
+
+def _parse_mila_totalizers_json(val):
+    if val is None:
+        return None
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, str):
+        try:
+            return json.loads(val or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return None
+    return None
+
+
+def _merge_mila_totalizers_start_json(group_rows, col="mila_totalizers_at_order_start"):
+    merged = {}
+    for r in group_rows:
+        d = _parse_mila_totalizers_json(r.get(col))
+        if not d:
+            continue
+        for k, v in d.items():
+            if isinstance(v, bool):
+                merged[k] = v
+                continue
+            try:
+                fv = float(v)
+                if fv != fv:
+                    continue
+                if k not in merged:
+                    merged[k] = fv
+                else:
+                    merged[k] = min(merged[k], fv)
+            except (TypeError, ValueError):
+                merged[k] = v
+    return merged if merged else None
+
+
+def _merge_mila_totalizers_end_json(group_rows, col="mila_totalizers_at_order_end"):
+    merged = {}
+    for r in group_rows:
+        d = _parse_mila_totalizers_json(r.get(col))
+        if not d:
+            continue
+        for k, v in d.items():
+            if isinstance(v, bool):
+                merged[k] = v
+                continue
+            try:
+                fv = float(v)
+                if fv != fv:
+                    continue
+                merged[k] = max(merged.get(k, fv), fv)
+            except (TypeError, ValueError):
+                merged[k] = v
+    return merged if merged else None
+
+
 def mila_realtime_monitor():
     import datetime
     import json
 
     global mila_order_counter, mila_current_order_name, mila_session_started, mila_session_ended
     global mila_b1_scale_at_order_start, mila_b1_scale_at_order_end
+    global mila_totalizers_at_order_start, mila_totalizers_at_order_end
 
     # Initialize counter from DB
     mila_order_counter = get_next_order_number("MILA", "mila_monitor_logs", "mila_monitor_logs_archive")
@@ -2345,7 +2436,18 @@ def mila_realtime_monitor():
             dubai_tz = pytz.timezone('Asia/Dubai')
             # Get current UTC time and convert to Dubai timezone (naive datetime for TIMESTAMP column)
             now = dt.now(pytz.utc).astimezone(dubai_tz).replace(tzinfo=None)
-            
+
+            # Build bran_receiver before order boundaries so snapshots match stored JSON shape
+            bran_receiver = data.get("bran_receiver", {})
+            bran_receiver_formatted = {
+                "9106 Bran coarse (kg)": bran_receiver.get("bran_coarse", 0),
+                "9105 Bran fine (kg)": bran_receiver.get("bran_fine", 0),
+                "MILA_Flour1 (kg)": bran_receiver.get("flour_1", 0),
+                "B1Scale (kg)": bran_receiver.get("b1", 0),
+                "Semolina (kg)": bran_receiver.get("semolina", 0),
+                "F2 Scale (kg)": data.get("f2_scale", {}).get("totalizer_kg", 0) or 0,
+            }
+
             # ✅ Get job_status from DB2099 (Bool converted to Int: 1=active, 0=done)
             job_status = DB2099.get("job_status", 0)
             linning_running = DB499.get('linning_running', False)
@@ -2357,9 +2459,11 @@ def mila_realtime_monitor():
             # 🟢 Start/Create order when job_status == 1 (order_active)
             if job_status == 1:
                 if not mila_current_order_name or not mila_session_started:
-                    b1_snap = _mila_b1_scale_kg_from_api(data.get("bran_receiver", {}))
+                    b1_snap = _mila_b1_scale_kg_from_api(bran_receiver)
                     mila_b1_scale_at_order_start = b1_snap
                     mila_b1_scale_at_order_end = None
+                    mila_totalizers_at_order_start = _mila_totalizers_dict_snapshot(bran_receiver_formatted)
+                    mila_totalizers_at_order_end = None
                     mila_current_order_name = f"MILA{mila_order_counter}"
                     mila_order_counter += 1
                     mila_session_started = now
@@ -2371,7 +2475,8 @@ def mila_realtime_monitor():
             # 🔴 End current order when job_status == 0 (order_done)
             elif job_status == 0:
                 if mila_current_order_name:
-                    mila_b1_scale_at_order_end = _mila_b1_scale_kg_from_api(data.get("bran_receiver", {}))
+                    mila_b1_scale_at_order_end = _mila_b1_scale_kg_from_api(bran_receiver)
+                    mila_totalizers_at_order_end = _mila_totalizers_dict_snapshot(bran_receiver_formatted)
                     mila_session_ended = now
                     logger.info(
                         f"✅ MILA order done: {mila_current_order_name} at {now} (job_status=0) "
@@ -2396,18 +2501,6 @@ def mila_realtime_monitor():
                 "MILA_Semolina (%)": DB2099.get("mila_semolina", 0),
                 "MILA_BranFine (%)": DB2099.get("mila_bran_fine", 0),
                 "flow_percentage (%)": data.get("f2_scale", {}).get("flow_percentage", 0) or 0,  # F2 scale offset 180
-            }
-
-            # ✅ Use bran_receiver Non-Erasable Weights from API (DInt values in kg from DB2099)
-            bran_receiver = data.get("bran_receiver", {})
-            # Format with proper labels for database storage
-            bran_receiver_formatted = {
-                "9106 Bran coarse (kg)": bran_receiver.get("bran_coarse", 0),
-                "9105 Bran fine (kg)": bran_receiver.get("bran_fine", 0),
-                "MILA_Flour1 (kg)": bran_receiver.get("flour_1", 0),
-                "B1Scale (kg)": bran_receiver.get("b1", 0),
-                "Semolina (kg)": bran_receiver.get("semolina", 0),
-                "F2 Scale (kg)": data.get("f2_scale", {}).get("totalizer_kg", 0) or 0,  # F2 scale offset 184
             }
 
             # Setpoint and status info (sorted by offset)
@@ -2445,15 +2538,18 @@ def mila_realtime_monitor():
                 cursor = conn.cursor()
                 b1_snap_s = mila_b1_scale_at_order_start if mila_current_order_name else None
                 b1_snap_e = mila_b1_scale_at_order_end if mila_current_order_name else None
+                tz_snap_s = json.dumps(mila_totalizers_at_order_start) if mila_current_order_name and mila_totalizers_at_order_start else None
+                tz_snap_e = json.dumps(mila_totalizers_at_order_end) if mila_current_order_name and mila_totalizers_at_order_end else None
                 cursor.execute("""
                     INSERT INTO mila_monitor_logs (
                         order_name, status, receiver,
                         bran_receiver, yield_log,
                         setpoints_produced, produced_weight, created_at,
                         order_start_time, order_end_time,
-                        mila_b1_scale_at_order_start, mila_b1_scale_at_order_end
+                        mila_b1_scale_at_order_start, mila_b1_scale_at_order_end,
+                        mila_totalizers_at_order_start, mila_totalizers_at_order_end
                     ) VALUES (%s, %s, %s::jsonb, %s::jsonb, %s::jsonb,
-                              %s::jsonb, %s, %s, %s, %s, %s, %s)
+                              %s::jsonb, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
                 """, (
                     mila_current_order_name,
                     "running",
@@ -2467,6 +2563,8 @@ def mila_realtime_monitor():
                     mila_session_ended,
                     b1_snap_s,
                     b1_snap_e,
+                    tz_snap_s,
+                    tz_snap_e,
                 ))
                 conn.commit()
                 logger.info(f"✅ MILA log saved: {mila_current_order_name} | Produced: {produced_weight} kg | Time: {now}")
@@ -2478,6 +2576,8 @@ def mila_realtime_monitor():
                 mila_session_ended = None
                 mila_b1_scale_at_order_start = None
                 mila_b1_scale_at_order_end = None
+                mila_totalizers_at_order_start = None
+                mila_totalizers_at_order_end = None
 
         except Exception as e:
             logger.error(f"❌ MILA monitor error: {e}", exc_info=True)

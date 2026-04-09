@@ -309,6 +309,30 @@ function buildFtraSenderStrings(lastRow) {
 
 const MILA_B1_SCALE_JSON_KEYS = ['B1Scale (kg)', 'B1Scale', 'B1 Scale', 'MILA_B1_scale (kg)'];
 
+/** Display order for Scale totalizers card (keys match backend bran_receiver_formatted / JSON snapshots). */
+const MILA_SCALE_TOTALIZER_CARD_ROWS = [
+  { label: 'B1', key: 'B1Scale (kg)' },
+  { label: 'F1', key: 'MILA_Flour1 (kg)' },
+  { label: 'F2', key: 'F2 Scale (kg)' },
+  { label: 'Bran coarse', key: '9106 Bran coarse (kg)' },
+  { label: 'Bran fine', key: '9105 Bran fine (kg)' },
+  { label: 'semolina', key: 'Semolina (kg)' },
+];
+
+function formatMilaSummaryDateTime(value) {
+  const d = value instanceof Date ? value : parseArchiveDate(value);
+  if (!d || isNaN(d.getTime())) return '—';
+  return d.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' });
+}
+
+function getMilaTotalizerKgFromDict(obj, key) {
+  if (!obj || typeof obj !== 'object') return null;
+  const v = obj[key];
+  if (v == null || v === '') return null;
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 function getB1ScaleKgFromBran(bran) {
   let obj = bran;
   if (typeof obj === 'string') {
@@ -1090,7 +1114,17 @@ function JobLogsPrintLayout({ summary, reportType, orderName, startDate, endDate
   const displayName = orderName ? String(orderName).replace(/MILA/gi, 'Mill-A') : reportTitle;
 
   if (reportType === 'MILL-A') {
-    const { bran_receiver_totals = {}, average_yield_log = {}, average_setpoints_percentages = {}, average_yield_flows = {}, receiver_weight_totals = {} } = summary;
+    const {
+      bran_receiver_totals = {},
+      average_yield_log = {},
+      average_setpoints_percentages = {},
+      average_yield_flows = {},
+      receiver_weight_totals = {},
+      mila_totalizers_at_order_start: printTzStart = {},
+      mila_totalizers_at_order_end: printTzEnd = {},
+      start_time: printSummaryStart,
+      end_time: printSummaryEnd,
+    } = summary;
     const receiverRows = [];
     if (receiver_weight_totals) {
       Object.entries(receiver_weight_totals).forEach(([key, data]) => {
@@ -1184,6 +1218,30 @@ function JobLogsPrintLayout({ summary, reportType, orderName, startDate, endDate
             <tbody>
               {branReceiverRows.map((row, i) => (
                 <tr key={i} className={row.isActualWeight ? 'font-semibold bg-zinc-100' : ''}><td className="border px-2 py-1">{row.id}</td><td className="border px-2 py-1 text-right">{Math.abs(parseFloat(row.weight)).toFixed(1)} kg</td></tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="mb-6">
+          <div className="font-semibold mb-2">Scale totalizers</div>
+          <div className="text-sm text-gray-600 mb-2">
+            {formatMilaSummaryDateTime(printSummaryStart)} → {formatMilaSummaryDateTime(printSummaryEnd)}
+          </div>
+          <table className="w-full border mb-1">
+            <thead>
+              <tr className="bg-gray-100">
+                <th className="border px-2 py-1">Scale</th>
+                <th className="border px-2 py-1 text-right">Start (kg)</th>
+                <th className="border px-2 py-1 text-right">End (kg)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {MILA_SCALE_TOTALIZER_CARD_ROWS.map(({ label, key }) => (
+                <tr key={key}>
+                  <td className="border px-2 py-1">{label}</td>
+                  <td className="border px-2 py-1 text-right">{formatFclTotalizerKg(getMilaTotalizerKgFromDict(printTzStart, key))}</td>
+                  <td className="border px-2 py-1 text-right">{formatFclTotalizerKg(getMilaTotalizerKgFromDict(printTzEnd, key))}</td>
+                </tr>
               ))}
             </tbody>
           </table>
@@ -1407,6 +1465,10 @@ function MilaReportView({ summary, selectedOrderName }) {
     average_setpoints_percentages = {},
     average_yield_flows = {},
     receiver_weight_totals = {},
+    mila_totalizers_at_order_start: tzStart = {},
+    mila_totalizers_at_order_end: tzEnd = {},
+    start_time: summaryStartTime,
+    end_time: summaryEndTime,
   } = summary;
 
   const receiverRows = [];
@@ -1474,7 +1536,7 @@ function MilaReportView({ summary, selectedOrderName }) {
     : [];
 
   return (
-    <div className="rounded-xl">
+    <div className="rounded-xl space-y-4">
       <div className="grid grid-cols-5 gap-4">
         <ReportCard title="Receiver">
           <ul className="space-y-1">
@@ -1535,6 +1597,35 @@ function MilaReportView({ summary, selectedOrderName }) {
           </ul>
         </ReportCard>
       </div>
+      <ReportCard title="Scale totalizers">
+        <div className="text-xs text-gray-600 dark:text-gray-400 mb-2">
+          {formatMilaSummaryDateTime(summaryStartTime)} → {formatMilaSummaryDateTime(summaryEndTime)}
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-gray-200 dark:border-zinc-600">
+                <th className="text-left py-1.5 pr-2 font-semibold">Scale</th>
+                <th className="text-right py-1.5 px-2 font-semibold">Start (kg)</th>
+                <th className="text-right py-1.5 pl-2 font-semibold">End (kg)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {MILA_SCALE_TOTALIZER_CARD_ROWS.map(({ label, key }) => {
+                const s = getMilaTotalizerKgFromDict(tzStart, key);
+                const e = getMilaTotalizerKgFromDict(tzEnd, key);
+                return (
+                  <tr key={key} className="border-b border-gray-100 dark:border-zinc-700/80">
+                    <td className="py-1.5 pr-2">{label}</td>
+                    <td className="text-right py-1.5 px-2 whitespace-nowrap">{formatFclTotalizerKg(s)}</td>
+                    <td className="text-right py-1.5 pl-2 whitespace-nowrap">{formatFclTotalizerKg(e)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </ReportCard>
     </div>
   );
 }

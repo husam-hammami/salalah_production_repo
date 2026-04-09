@@ -82,6 +82,16 @@ MIGRATIONS = [
             "ALTER TABLE mila_monitor_logs_archive ADD COLUMN IF NOT EXISTS mila_b1_scale_at_order_end NUMERIC",
         ],
     },
+    {
+        "id": "007_mila_totalizers_json_snapshots",
+        "description": "MIL-A all scale totalizers at order start/end as JSONB (two columns)",
+        "statements": [
+            "ALTER TABLE mila_monitor_logs ADD COLUMN IF NOT EXISTS mila_totalizers_at_order_start JSONB",
+            "ALTER TABLE mila_monitor_logs ADD COLUMN IF NOT EXISTS mila_totalizers_at_order_end JSONB",
+            "ALTER TABLE mila_monitor_logs_archive ADD COLUMN IF NOT EXISTS mila_totalizers_at_order_start JSONB",
+            "ALTER TABLE mila_monitor_logs_archive ADD COLUMN IF NOT EXISTS mila_totalizers_at_order_end JSONB",
+        ],
+    },
 ]
 
 

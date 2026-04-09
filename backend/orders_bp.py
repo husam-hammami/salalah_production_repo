@@ -3076,6 +3076,113 @@ def _mila_b1_kg_from_bran_receiver(bran):
     return None
 
 
+_MILA_TOTALIZER_JSON_KEYS = (
+    "9106 Bran coarse (kg)",
+    "9105 Bran fine (kg)",
+    "MILA_Flour1 (kg)",
+    "B1Scale (kg)",
+    "Semolina (kg)",
+    "F2 Scale (kg)",
+)
+
+
+def _parse_mila_totalizers_json_bp(val):
+    if val is None:
+        return None
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, str):
+        try:
+            return json.loads(val or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return None
+    return None
+
+
+def _merge_mila_totalizers_start_from_rows(rows):
+    merged = {}
+    for r in rows:
+        d = _parse_mila_totalizers_json_bp(r.get("mila_totalizers_at_order_start"))
+        if not d:
+            continue
+        for k, v in d.items():
+            if isinstance(v, bool):
+                merged[k] = v
+                continue
+            try:
+                fv = float(v)
+                if fv != fv:
+                    continue
+                if k not in merged:
+                    merged[k] = fv
+                else:
+                    merged[k] = min(merged[k], fv)
+            except (TypeError, ValueError):
+                merged[k] = v
+    return merged if merged else None
+
+
+def _merge_mila_totalizers_end_from_rows(rows):
+    merged = {}
+    for r in rows:
+        d = _parse_mila_totalizers_json_bp(r.get("mila_totalizers_at_order_end"))
+        if not d:
+            continue
+        for k, v in d.items():
+            if isinstance(v, bool):
+                merged[k] = v
+                continue
+            try:
+                fv = float(v)
+                if fv != fv:
+                    continue
+                merged[k] = max(merged.get(k, fv), fv)
+            except (TypeError, ValueError):
+                merged[k] = v
+    return merged if merged else None
+
+
+def _mila_bran_receiver_to_totalizer_dict(bran):
+    if not bran:
+        return None
+    if isinstance(bran, str):
+        try:
+            bran = json.loads(bran or "{}")
+        except (json.JSONDecodeError, TypeError):
+            return None
+    if not isinstance(bran, dict):
+        return None
+    out = {}
+    for k in _MILA_TOTALIZER_JSON_KEYS:
+        if k not in bran:
+            continue
+        v = bran.get(k)
+        if v is None or v == "":
+            continue
+        try:
+            out[k] = round(float(v), 3)
+        except (TypeError, ValueError):
+            continue
+    return out if out else None
+
+
+def _round_mila_totalizer_dict(d):
+    if not d:
+        return None
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, bool):
+            out[k] = v
+        elif isinstance(v, (int, float)):
+            out[k] = round(float(v), 3)
+        else:
+            try:
+                out[k] = round(float(v), 3)
+            except (TypeError, ValueError):
+                out[k] = v
+    return out
+
+
 @orders_bp.route('/mila/archive/summary', methods=['GET'])
 def get_mila_archive_summary():
     """
@@ -3398,6 +3505,15 @@ def get_mila_archive_summary():
         if mila_b1_snap_end is None:
             mila_b1_snap_end = _mila_b1_kg_from_bran_receiver(last_record.get("bran_receiver"))
 
+        tz_start = _merge_mila_totalizers_start_from_rows(all_rows)
+        tz_end = _merge_mila_totalizers_end_from_rows(all_rows)
+        if not tz_start:
+            tz_start = _mila_bran_receiver_to_totalizer_dict(first_record.get("bran_receiver"))
+        if not tz_end:
+            tz_end = _mila_bran_receiver_to_totalizer_dict(last_record.get("bran_receiver"))
+        tz_start = _round_mila_totalizer_dict(tz_start)
+        tz_end = _round_mila_totalizer_dict(tz_end)
+
         summary_response = {
             "record_count": record_count,
             "total_produced_weight": round(total_produced_weight, 3),
@@ -3410,6 +3526,8 @@ def get_mila_archive_summary():
             "end_time": real_end,
             "mila_b1_scale_at_order_start": mila_b1_snap_start,
             "mila_b1_scale_at_order_end": mila_b1_snap_end,
+            "mila_totalizers_at_order_start": tz_start or {},
+            "mila_totalizers_at_order_end": tz_end or {},
         }
         
         logger.info(f"📊 [MIL-A Summary] Sending bran_receiver_totals: {bran_receiver_totals}")

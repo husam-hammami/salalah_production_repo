@@ -634,11 +634,9 @@ export default function JobLogs() {
     const endD = selectedOrder.endDate;
     const validStart = startD instanceof Date && !isNaN(startD.getTime());
     const validEnd = endD instanceof Date && !isNaN(endD.getTime());
-    // Only send date range for MILL-A; FCL/SCL/FTRA use order's full range from backend (avoids "No records found in selected time range")
-    if (selectedReport === 'MILL-A' && validStart && validEnd) {
-      params.start_date = new Date(startD.getTime() - 2 * 60 * 1000).toISOString();
-      params.end_date = endD.toISOString();
-    }
+    // MIL-A: do not pass start_date/end_date — same as FCL/SCL/FTRA. A narrowed window caused
+    // job detail (analytics summary) to use a different row set than the jobs table, so B1/totalizer
+    // end values could disagree with buildJobList's aggregateMilaB1ScaleSnapshot on full order rows.
     axios.get(endpoint, { params })
       .then((res) => {
           if (res.data?.status === 'success' && res.data.summary) {

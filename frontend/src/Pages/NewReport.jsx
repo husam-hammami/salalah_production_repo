@@ -1031,6 +1031,12 @@ function formatMilaTotalizerKg(value) {
   return formatMilaReportKg(value);
 }
 
+/** FCL 520WE cumulative totalizer display (same formatting as Job Logs). */
+function formatFclTotalizerKg(value) {
+  if (value == null || Number.isNaN(parseFloat(value))) return '—';
+  return formatMilaReportKg(value);
+}
+
 /** Canonical scale totalizer snapshot from one bran_receiver row (same keys as backend summary). */
 function buildMilaScaleTotalizerSnapshotFromBran(bran) {
   let obj = bran;
@@ -1328,7 +1334,7 @@ const NewReport = () => {
   };
 
   // Reusable summary card layout for SCL and FCL
-  function SummaryCardLayout({ summary, reportType, consumedOverride }) {
+  function SummaryCardLayout({ summary, reportType, consumedOverride, filterStart, filterEnd }) {
     if (!summary) return <div>No summary data available</div>;
 
     const {
@@ -1347,6 +1353,10 @@ const NewReport = () => {
       main_receiver_weight = 0,  // ✅ Main receiver weight (bin 028, 030, etc.) - FCL only
       fcl_2_520we_weight = 0,  // ✅ Get FCL_2_520WE separately - FCL only
       fcl_2_520we_last_value = 0, // ✅ Absolute last value for FCL_2_520WE row
+      fcl_2_520we_at_order_start: fcl520weAtOrderStart = null,
+      fcl_2_520we_at_order_end: fcl520weAtOrderEnd = null,
+      start_time: summaryStartTime,
+      end_time: summaryEndTime,
       record_count = 0,
     } = summary;
 
@@ -1474,6 +1484,18 @@ const NewReport = () => {
       ? (main_receiver_weight || receiverActualWeight)  // FCL: Use delta (end - start)
       : receiverActualWeight;  // SCL: Use receiver sum
 
+    const hasUserFilterRange =
+      String(filterStart || '').trim() !== '' && String(filterEnd || '').trim() !== '';
+    const fclScaleTotalizersSubtitle =
+      reportType === 'FCL' &&
+      (hasUserFilterRange
+        ? `${new Date(filterStart).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })} → ${new Date(filterEnd).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}`
+        : `${formatMilaSummaryDateTime(summaryStartTime)} → ${formatMilaSummaryDateTime(summaryEndTime)}`);
+    const fclHasAny520weSnapshot =
+      reportType === 'FCL' &&
+      ((fcl520weAtOrderStart != null && fcl520weAtOrderStart !== '') ||
+        (fcl520weAtOrderEnd != null && fcl520weAtOrderEnd !== ''));
+
     return (
       <div
         className="bg-white dark:bg-[#232c3d] rounded-2xl p-6 w-full px-4 md:px-10 xl:px-20 mx-auto mt-4 mb-8 border border-gray-300 dark:border-gray-700 dark:text-gray-100"
@@ -1579,6 +1601,43 @@ const NewReport = () => {
             </tbody>
           </table>
         </div>
+
+        {fclHasAny520weSnapshot && (
+          <div className="mb-6">
+            <div className="font-semibold mb-2">Scale totalizers</div>
+            <div className="text-xs text-gray-600 dark:text-gray-400 mb-2">
+              {fclScaleTotalizersSubtitle}
+            </div>
+            <table className="w-full border mb-1">
+              <thead>
+                <tr className="bg-gray-100 dark:bg-[#1a2233] dark:text-gray-100">
+                  <th className="border px-2 py-1 dark:border-gray-700 dark:text-gray-100 text-left">
+                    Scale
+                  </th>
+                  <th className="border px-2 py-1 dark:border-gray-700 dark:text-gray-100 text-right">
+                    Start (kg)
+                  </th>
+                  <th className="border px-2 py-1 dark:border-gray-700 dark:text-gray-100 text-right">
+                    End (kg)
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td className="border px-2 py-1 dark:border-gray-700 dark:text-gray-100">
+                    FCL 2_520WE
+                  </td>
+                  <td className="border px-2 py-1 text-right dark:border-gray-700 dark:text-gray-100">
+                    {formatFclTotalizerKg(fcl520weAtOrderStart)}
+                  </td>
+                  <td className="border px-2 py-1 text-right dark:border-gray-700 dark:text-gray-100">
+                    {formatFclTotalizerKg(fcl520weAtOrderEnd)}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        )}
 
         {/* Setpoints Section */}
         <div className="mb-6">
@@ -2578,6 +2637,8 @@ const NewReport = () => {
           <SummaryCardLayout
             summary={fclSummaryData}
             reportType="FCL"
+            filterStart={startDate}
+            filterEnd={endDate}
           />
         );
       }

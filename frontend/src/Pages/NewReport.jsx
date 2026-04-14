@@ -961,6 +961,100 @@ const REPORT_OPTIONS = [
 
 const PERIOD_OPTIONS = ["Hourly", "Daily", "Weekly", "Monthly", "Full Report"];
 
+/** Parse summary / archive timestamps (ISO "YYYY-MM-DD HH:MM:SS", RFC 822, or as-is). */
+function parseMilaReportDate(value) {
+  if (value == null) return null;
+  let s = String(value).trim();
+  if (!s) return null;
+  const isoMatch = s.match(/^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2}(?:\.\d+)?)/);
+  if (isoMatch) {
+    s = isoMatch[1] + 'T' + isoMatch[2];
+    const dot = s.indexOf('.');
+    if (dot !== -1) s = s.substring(0, dot);
+  }
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+const MILA_B1_SCALE_JSON_KEYS = ['B1Scale (kg)', 'B1Scale', 'B1 Scale', 'MILA_B1_scale (kg)'];
+
+/** Display order for Scale totalizers (keys match backend bran_receiver / JSON snapshots). */
+const MILA_SCALE_TOTALIZER_CARD_ROWS = [
+  { label: 'B1', key: 'B1Scale (kg)' },
+  { label: 'F1', key: 'MILA_Flour1 (kg)' },
+  { label: 'F2', key: 'F2 Scale (kg)' },
+  { label: 'Bran coarse', key: '9106 Bran coarse (kg)' },
+  { label: 'Bran fine', key: '9105 Bran fine (kg)' },
+  { label: 'semolina', key: 'Semolina (kg)' },
+];
+
+function formatMilaSummaryDateTime(value) {
+  const d = value instanceof Date ? value : parseMilaReportDate(value);
+  if (!d || isNaN(d.getTime())) return '—';
+  return d.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' });
+}
+
+function getMilaTotalizerKgFromDict(obj, key) {
+  if (!obj || typeof obj !== 'object') return null;
+  const v = obj[key];
+  if (v == null || v === '') return null;
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function getB1ScaleKgFromBran(bran) {
+  let obj = bran;
+  if (typeof obj === 'string') {
+    try {
+      obj = JSON.parse(obj || '{}');
+    } catch {
+      obj = {};
+    }
+  }
+  if (!obj || typeof obj !== 'object') return null;
+  for (const k of MILA_B1_SCALE_JSON_KEYS) {
+    if (obj[k] != null && obj[k] !== '') {
+      const v = parseFloat(obj[k]);
+      if (Number.isFinite(v)) return v;
+    }
+  }
+  return null;
+}
+
+function formatMilaReportKg(value) {
+  const n = Math.abs(parseFloat(value) || 0);
+  return n.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' kg';
+}
+
+function formatMilaTotalizerKg(value) {
+  if (value == null || Number.isNaN(parseFloat(value))) return '—';
+  return formatMilaReportKg(value);
+}
+
+/** Canonical scale totalizer snapshot from one bran_receiver row (same keys as backend summary). */
+function buildMilaScaleTotalizerSnapshotFromBran(bran) {
+  let obj = bran;
+  if (typeof obj === 'string') {
+    try {
+      obj = JSON.parse(obj || '{}');
+    } catch {
+      obj = {};
+    }
+  }
+  if (!obj || typeof obj !== 'object') return {};
+  const out = {};
+  for (const { key } of MILA_SCALE_TOTALIZER_CARD_ROWS) {
+    if (key === 'B1Scale (kg)') {
+      const v = getB1ScaleKgFromBran(obj);
+      if (v != null) out[key] = v;
+    } else {
+      const v = getMilaTotalizerKgFromDict(obj, key);
+      if (v != null) out[key] = v;
+    }
+  }
+  return out;
+}
+
 // Default range helper (used when user does not select explicit end date)
 const getPeriodRange = (period, dateInput) => {
   if (!dateInput) return { start: null, end: null };
@@ -1851,7 +1945,7 @@ const NewReport = () => {
     );
   }
 
-  function MilaSummaryLayout({ summary }) {
+  function MilaSummaryLayout({ summary, filterStart, filterEnd }) {
     if (!summary) return <div>No summary data available</div>;
     
     // ✅ Helper function to remove UOM from labels
@@ -1886,7 +1980,21 @@ const NewReport = () => {
       receiver_weight_totals,
       start_time,
       end_time,
+      mila_totalizers_at_order_start: tzStart = {},
+      mila_totalizers_at_order_end: tzEnd = {},
     } = summary;
+
+    const hasUserFilterRange =
+      String(filterStart || '').trim() !== '' && String(filterEnd || '').trim() !== '';
+    const scaleTotalizersRangeSubtitle = hasUserFilterRange
+      ? `${new Date(filterStart).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })} → ${new Date(filterEnd).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}`
+      : `${formatMilaSummaryDateTime(start_time)} → ${formatMilaSummaryDateTime(end_time)}`;
+
+    const hasAnyScaleTotalizer = MILA_SCALE_TOTALIZER_CARD_ROWS.some(
+      ({ key }) =>
+        getMilaTotalizerKgFromDict(tzStart, key) != null ||
+        getMilaTotalizerKgFromDict(tzEnd, key) != null
+    );
 
     // ✅ Build Receiver rows - one row per bin with per-bin weight (including 0)
     const receiverRows = [];
@@ -2185,6 +2293,37 @@ const NewReport = () => {
           </table>
         </div>
 
+        {hasAnyScaleTotalizer && (
+          <div className="mb-6">
+            <div className="font-semibold mb-2">Scale totalizers</div>
+            <div className="text-xs text-gray-600 dark:text-gray-400 mb-2">
+              {scaleTotalizersRangeSubtitle}
+            </div>
+            <table className="w-full border mb-1">
+              <thead>
+                <tr className="bg-gray-100">
+                  <th className="border px-2 py-1 text-left">Scale</th>
+                  <th className="border px-2 py-1 text-right">Start (kg)</th>
+                  <th className="border px-2 py-1 text-right">End (kg)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {MILA_SCALE_TOTALIZER_CARD_ROWS.map(({ label, key }) => (
+                  <tr key={key}>
+                    <td className="border px-2 py-1">{label}</td>
+                    <td className="border px-2 py-1 text-right">
+                      {formatMilaTotalizerKg(getMilaTotalizerKgFromDict(tzStart, key))}
+                    </td>
+                    <td className="border px-2 py-1 text-right">
+                      {formatMilaTotalizerKg(getMilaTotalizerKgFromDict(tzEnd, key))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
         {/* Yield Log Section */}
         <div className="mb-6">
           <div className="font-semibold mb-2">Yield Log</div>
@@ -2284,7 +2423,13 @@ const NewReport = () => {
 
       // If we have summary data from API, use it
       if (milaSummaryData) {
-        return <MilaSummaryLayout summary={milaSummaryData} />;
+        return (
+          <MilaSummaryLayout
+            summary={milaSummaryData}
+            filterStart={startDate}
+            filterEnd={endDate}
+          />
+        );
       }
 
       // Otherwise, compute summary from filteredData (fallback - use DELTA calculation)
@@ -2299,6 +2444,9 @@ const NewReport = () => {
         const firstProduced = parseFloat(firstRecord.produced_weight) || 0;
         const lastProduced = parseFloat(lastRecord.produced_weight) || 0;
         
+        const firstBran = typeof firstRecord.bran_receiver === 'string' ? JSON.parse(firstRecord.bran_receiver) : (firstRecord.bran_receiver || {});
+        const lastBran = typeof lastRecord.bran_receiver === 'string' ? JSON.parse(lastRecord.bran_receiver) : (lastRecord.bran_receiver || {});
+
         const computedSummary = {
           total_produced_weight: lastProduced - firstProduced,
           bran_receiver_totals: {},
@@ -2308,12 +2456,12 @@ const NewReport = () => {
           receiver_weight_totals: {},
           record_count: filteredData.length,
           start_time: firstRecord.created_at,
-          end_time: lastRecord.created_at
+          end_time: lastRecord.created_at,
+          mila_totalizers_at_order_start: buildMilaScaleTotalizerSnapshotFromBran(firstBran),
+          mila_totalizers_at_order_end: buildMilaScaleTotalizerSnapshotFromBran(lastBran),
         };
 
         // ✅ Calculate DELTA for bran_receiver (cumulative counters)
-        const firstBran = typeof firstRecord.bran_receiver === 'string' ? JSON.parse(firstRecord.bran_receiver) : (firstRecord.bran_receiver || {});
-        const lastBran = typeof lastRecord.bran_receiver === 'string' ? JSON.parse(lastRecord.bran_receiver) : (lastRecord.bran_receiver || {});
         
         Object.keys(lastBran).forEach(key => {
           const lastVal = parseFloat(lastBran[key]) || 0;
@@ -2367,7 +2515,13 @@ const NewReport = () => {
         console.log('[MIL-A Fallback] Total Bran:', Object.values(computedSummary.bran_receiver_totals).reduce((a,b) => a+b, 0).toFixed(1), 'kg');
 
         console.log('[MIL-A] Computed summary from filteredData:', computedSummary);
-        return <MilaSummaryLayout summary={computedSummary} />;
+        return (
+          <MilaSummaryLayout
+            summary={computedSummary}
+            filterStart={startDate}
+            filterEnd={endDate}
+          />
+        );
       }
 
       // If no summary data and no filtered data, show message
